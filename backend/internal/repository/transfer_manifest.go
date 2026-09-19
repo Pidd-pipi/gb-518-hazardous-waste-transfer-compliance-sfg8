@@ -13,12 +13,14 @@ type TransferManifestRepository interface {
 	List(context.Context, dto.PageQuery) (Page[model.TransferManifest], error)
 	Get(context.Context, uint) (model.TransferManifest, error)
 	FindByCode(context.Context, string) (model.TransferManifest, error)
+	GetForUpdate(context.Context, uint) (model.TransferManifest, error)
 	Create(context.Context, *model.TransferManifest) error
 	CreateAudited(context.Context, *model.TransferManifest, *model.AuditLog) error
 	Update(context.Context, uint, uint, *model.TransferManifest) error
 	UpdateAudited(context.Context, uint, uint, *model.TransferManifest, *model.AuditLog) error
 	Delete(context.Context, uint) error
 	DeleteAudited(context.Context, uint, *model.AuditLog) error
+	AppendAudit(context.Context, *model.AuditLog) error
 	CountByStatus(context.Context) (map[string]int64, error)
 }
 
@@ -39,6 +41,9 @@ func (r *transferManifestRepository) Get(ctx context.Context, id uint) (model.Tr
 func (r *transferManifestRepository) FindByCode(ctx context.Context, code string) (model.TransferManifest, error) {
 	return r.store.FindByCode(ctx, code)
 }
+func (r *transferManifestRepository) GetForUpdate(ctx context.Context, id uint) (model.TransferManifest, error) {
+	return r.store.GetForUpdate(ctx, id)
+}
 func (r *transferManifestRepository) Create(ctx context.Context, item *model.TransferManifest) error {
 	return r.store.Create(ctx, item)
 }
@@ -56,6 +61,9 @@ func (r *transferManifestRepository) Delete(ctx context.Context, id uint) error 
 }
 func (r *transferManifestRepository) DeleteAudited(ctx context.Context, id uint, audit *model.AuditLog) error {
 	return r.store.DeleteAudited(ctx, id, audit)
+}
+func (r *transferManifestRepository) AppendAudit(ctx context.Context, audit *model.AuditLog) error {
+	return conn(ctx, r.store.db).Create(audit).Error
 }
 func (r *transferManifestRepository) CountByStatus(ctx context.Context) (map[string]int64, error) {
 	return r.store.CountByStatus(ctx)

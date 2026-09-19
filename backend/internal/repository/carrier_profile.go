@@ -13,6 +13,7 @@ type CarrierProfileRepository interface {
 	List(context.Context, dto.PageQuery) (Page[model.CarrierProfile], error)
 	Get(context.Context, uint) (model.CarrierProfile, error)
 	FindByCode(context.Context, string) (model.CarrierProfile, error)
+	FindByCodeForUpdate(context.Context, string) (model.CarrierProfile, error)
 	Create(context.Context, *model.CarrierProfile) error
 	CreateAudited(context.Context, *model.CarrierProfile, *model.AuditLog) error
 	Update(context.Context, uint, uint, *model.CarrierProfile) error
@@ -38,6 +39,9 @@ func (r *carrierProfileRepository) Get(ctx context.Context, id uint) (model.Carr
 }
 func (r *carrierProfileRepository) FindByCode(ctx context.Context, code string) (model.CarrierProfile, error) {
 	return r.store.FindByCode(ctx, code)
+}
+func (r *carrierProfileRepository) FindByCodeForUpdate(ctx context.Context, code string) (model.CarrierProfile, error) {
+	return r.store.FindByCodeForUpdate(ctx, code)
 }
 func (r *carrierProfileRepository) Create(ctx context.Context, item *model.CarrierProfile) error {
 	return r.store.Create(ctx, item)

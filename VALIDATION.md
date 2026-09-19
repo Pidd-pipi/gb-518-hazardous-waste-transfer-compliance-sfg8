@@ -42,6 +42,10 @@ KEEP_RUNNING=1 ./scripts/validate.sh
 - `draft → in_transit` 跳级返回 422；合法 `draft → submitted` 成功并写入 `validation-manifest-submit`。
 - 使用旧版本推进联单返回 409。
 - 关联尚未核准的 `CP-001` 时，联单提交返回 422。
+- **资质快照闭环**：提交/发运在同一事务内冻结产废许可与承运资质的证照编号、状态、有效期、证照版本与车辆数（`/api/snapshots/:code` 可回读）。
+- **发运前实时停用**：承运方 `verified → restricted` 后发运返回 422 `qualification_invalid`，联单仍停在 `submitted` 且版本不变，但已冻结一张 `valid=false` 的发运快照并带失效原因；刷新后可读。
+- **核验只看冻结快照**：失效快照上的核验 `pass` 返回 422；有效快照的决定依据包含快照版本、证照编号、有效期与车辆数。
+- **并发唯一成功**：8 个并发提交同一草稿只有 1 个 200、其余 409，数据库中仅生成一张提交快照（行锁 + 乐观版本 + 快照 `(manifest_id, version)` 唯一索引）。
 - operator 创建核验成功，但作出通过决定返回 403。
 - reviewer 执行 `pending → pass` 成功，决定依据持久化，request ID 为 `validation-reviewer-decision`。
 - 审计汇总包含至少 5 条写操作和至少 2 次状态迁移；自定义 request ID 可从审计列表检索。

@@ -13,6 +13,7 @@ type WasteGeneratorRepository interface {
 	List(context.Context, dto.PageQuery) (Page[model.WasteGenerator], error)
 	Get(context.Context, uint) (model.WasteGenerator, error)
 	FindByCode(context.Context, string) (model.WasteGenerator, error)
+	FindByCodeForUpdate(context.Context, string) (model.WasteGenerator, error)
 	Create(context.Context, *model.WasteGenerator) error
 	CreateAudited(context.Context, *model.WasteGenerator, *model.AuditLog) error
 	Update(context.Context, uint, uint, *model.WasteGenerator) error
@@ -38,6 +39,9 @@ func (r *wasteGeneratorRepository) Get(ctx context.Context, id uint) (model.Wast
 }
 func (r *wasteGeneratorRepository) FindByCode(ctx context.Context, code string) (model.WasteGenerator, error) {
 	return r.store.FindByCode(ctx, code)
+}
+func (r *wasteGeneratorRepository) FindByCodeForUpdate(ctx context.Context, code string) (model.WasteGenerator, error) {
+	return r.store.FindByCodeForUpdate(ctx, code)
 }
 func (r *wasteGeneratorRepository) Create(ctx context.Context, item *model.WasteGenerator) error {
 	return r.store.Create(ctx, item)

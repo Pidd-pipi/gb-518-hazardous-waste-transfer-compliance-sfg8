@@ -21,6 +21,11 @@ type TransferManifest struct {
 	EffectiveAt   time.Time `json:"effectiveAt"`
 	Evidence      string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode   string    `json:"relatedCode" gorm:"size:64;index"`
+
+	// LatestSnapshot is hydrated by the service from qualification_snapshots
+	// (never from live generator/carrier rows) for API responses. The frozen
+	// snapshot version/有效期/失效原因 all live on that record.
+	LatestSnapshot *QualificationSnapshot `json:"latestSnapshot,omitempty" gorm:"-"`
 }
 
 func (item *TransferManifest) GetBase() *BaseModel { return &item.BaseModel }

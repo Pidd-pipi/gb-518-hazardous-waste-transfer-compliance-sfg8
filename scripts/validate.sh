@@ -112,7 +112,57 @@ operator_decision=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_ur
 decision=$(curl -fsS -X POST "$backend_url/api/checks/$check_id/transition" \
   -H "Authorization: Bearer $reviewer_token" -H 'X-Request-ID: validation-reviewer-decision' -H 'Content-Type: application/json' \
   -d "{\"status\":\"pass\",\"expectedVersion\":$check_version,\"reason\":\"all evidence groups verified\"}")
-printf '%s' "$decision" | jq -e '.data.status == "pass" and .data.version == 2 and .data.decisionBasis == "all evidence groups verified"' >/dev/null
+# The decision must pass and its basis must cite the FROZEN qualification snapshot
+# (version + permit/license numbers) rather than only the reviewer text.
+printf '%s' "$decision" | jq -e '.data.status == "pass" and .data.version == 2
+  and (.data.decisionBasis | startswith("all evidence groups verified"))
+  and (.data.decisionBasis | contains("冻结资质快照"))
+  and (.data.frozenSnapshot.version >= 1) and (.data.frozenSnapshot.valid == true)
+  and (.data.frozenSnapshot.permitNumber == "PERMIT-WG-001")
+  and (.data.frozenSnapshot.licenseNumber == "CARRIER-LIC-002")
+  and (.data.frozenSnapshot.vehicleCount == 16)' >/dev/null
+
+# --- 资质快照闭环 -----------------------------------------------------------
+# The submitted manifest carries a frozen submission snapshot: certificate
+# numbers, statuses, expiry dates and vehicle count frozen alongside the manifest.
+snapshots=$(curl -fsS "$backend_url/api/snapshots/$manifest_code" -H "Authorization: Bearer $reviewer_token")
+printf '%s' "$snapshots" | jq -e '.data.latest.version == 1 and .data.latest.stage == "submission"
+  and .data.latest.valid == true and .data.latest.generatorStatus == "active"
+  and .data.latest.carrierStatus == "verified" and .data.latest.vehicleCount == 16
+  and (.data.latest.permitExpiresAt | length > 0) and (.data.latest.licenseExpiresAt | length > 0)' >/dev/null
+
+# A dispatch blocked by a pre-dispatch suspension rejects the whole manifest while
+# the status stays unchanged, yet freezes an invalid snapshot with a reason.
+blocked_dispatch_code="TM-BLOCKDISPATCH-$stamp"
+blocked_dispatch_payload=$(printf '%s' "$manifest_payload" | jq --arg code "$blocked_dispatch_code" '.code=$code')
+bd_created=$(curl -fsS -X POST "$backend_url/api/manifests" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$blocked_dispatch_payload")
+bd_id=$(printf '%s' "$bd_created" | jq -er '.data.id')
+curl -fsS -X POST "$backend_url/api/manifests/$bd_id/transition" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"status":"submitted","expectedVersion":1,"reason":"freeze submission snapshot first"}' >/dev/null
+# Move CP-002 off verified as the reviewer before dispatch (verified -> restricted).
+cp002_id=$(curl -fsS "$backend_url/api/carriers?search=CP-002" -H "Authorization: Bearer $reviewer_token" | jq -er '.data[0].id')
+curl -fsS -X POST "$backend_url/api/carriers/$cp002_id/transition" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"status":"restricted","expectedVersion":1,"reason":"simulate pre-dispatch suspension"}' >/dev/null
+refused_status=$(curl -sS -o /tmp/bd-refused.json -w '%{http_code}' -X POST "$backend_url/api/manifests/$bd_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"status":"in_transit","expectedVersion":2,"reason":"dispatch after live suspension"}')
+[ "$refused_status" = "422" ]
+jq -e '.error == "qualification_invalid"' /tmp/bd-refused.json >/dev/null
+# Manifest stays submitted at version 2, but an invalid dispatch snapshot (v2) is frozen.
+curl -fsS "$backend_url/api/manifests/$bd_id" -H "Authorization: Bearer $operator_token" \
+  | jq -e '.data.status == "submitted" and .data.version == 2
+    and .data.latestSnapshot.version == 2 and .data.latestSnapshot.stage == "dispatch"
+    and .data.latestSnapshot.valid == false and (.data.latestSnapshot.invalidReason | length > 0)' >/dev/null
+# The compliance page cannot pass against the invalid frozen snapshot.
+bd_check_code="CC-BLOCKDISPATCH-$stamp"
+bd_check_payload=$(printf '%s' "$check_payload" | jq --arg code "$bd_check_code" --arg m "$blocked_dispatch_code" '.code=$code | .manifestCode=$m')
+bd_check=$(curl -fsS -X POST "$backend_url/api/checks" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$bd_check_payload")
+bd_check_id=$(printf '%s' "$bd_check" | jq -er '.data.id')
+bd_pass_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/checks/$bd_check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"status":"pass","expectedVersion":1,"reason":"must not pass invalid snapshot"}')
+[ "$bd_pass_status" = "422" ]
+rm -f /tmp/bd-refused.json
 
 viewer_audit_status=$(curl -sS -o /dev/null -w '%{http_code}' "$backend_url/api/audits" -H "Authorization: Bearer $viewer_token")
 [ "$viewer_audit_status" = "403" ]

@@ -25,18 +25,31 @@ type ComplianceCheckService interface {
 type complianceCheckService struct {
 	repository repository.ComplianceCheckRepository
 	manifests  repository.TransferManifestRepository
+	snapshots  QualificationSnapshotService
 }
 
-func NewComplianceCheckService(repo repository.ComplianceCheckRepository, manifests repository.TransferManifestRepository) ComplianceCheckService {
-	return &complianceCheckService{repository: repo, manifests: manifests}
+func NewComplianceCheckService(repo repository.ComplianceCheckRepository, manifests repository.TransferManifestRepository, snapshots QualificationSnapshotService) ComplianceCheckService {
+	return &complianceCheckService{repository: repo, manifests: manifests, snapshots: snapshots}
 }
 
 func (s *complianceCheckService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.ComplianceCheck], error) {
-	return s.repository.List(ctx, query)
+	page, err := s.repository.List(ctx, query)
+	if err != nil {
+		return page, err
+	}
+	s.snapshots.HydrateChecks(ctx, page.Items)
+	return page, nil
 }
 
 func (s *complianceCheckService) Get(ctx context.Context, id uint) (model.ComplianceCheck, error) {
-	return s.repository.Get(ctx, id)
+	item, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return model.ComplianceCheck{}, err
+	}
+	if err := s.snapshots.HydrateCheck(ctx, &item); err != nil {
+		return model.ComplianceCheck{}, err
+	}
+	return item, nil
 }
 
 func (s *complianceCheckService) Create(ctx context.Context, input dto.CreateComplianceCheck, actor, requestID string) (model.ComplianceCheck, error) {
@@ -109,12 +122,34 @@ func (s *complianceCheckService) Transition(ctx context.Context, id uint, input 
 	if !constants.CanTransition(constants.ComplianceCheckTransitions, current.Status, target) {
 		return model.ComplianceCheck{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
 	}
-	manifest, err := s.manifests.FindByCode(ctx, current.ManifestCode)
+	// 核验页只按冻结快照作出决定：不读取证照实时数据，证照之后变化也不影响本页。
+	history, err := s.snapshots.ListByManifestCode(ctx, current.ManifestCode)
 	if err != nil {
-		return model.ComplianceCheck{}, fmt.Errorf("%w: linked manifest is unavailable", ErrInvalidInput)
+		return model.ComplianceCheck{}, fmt.Errorf("%w: linked manifest snapshot is unavailable", ErrInvalidInput)
 	}
-	if target == string(constants.CheckStatePass) && manifest.Status != string(constants.ManifestStateSubmitted) && manifest.Status != string(constants.ManifestStateInTransit) && manifest.Status != string(constants.ManifestStateReceived) {
-		return model.ComplianceCheck{}, fmt.Errorf("%w: only an active or received manifest can pass compliance review", ErrInvalidInput)
+	var latest *model.QualificationSnapshot
+	if len(history) > 0 {
+		latest = &history[0]
+	}
+	if latest == nil {
+		return model.ComplianceCheck{}, fmt.Errorf("%w: manifest %s has no frozen qualification snapshot; submit or dispatch it before review", ErrSnapshotNotFrozen, current.ManifestCode)
+	}
+	if target == string(constants.CheckStatePass) {
+		// 流程资格仍来自联单自身状态：已驳回联单不能通过核验。资质有效性则只看
+		// 冻结快照，不读取证照实时数据，证照之后变化不影响本决定。
+		manifest, manifestErr := s.manifests.FindByCode(ctx, current.ManifestCode)
+		if manifestErr != nil {
+			return model.ComplianceCheck{}, fmt.Errorf("%w: linked manifest is unavailable", ErrInvalidInput)
+		}
+		if manifest.Status == string(constants.ManifestStateRejected) {
+			return model.ComplianceCheck{}, fmt.Errorf("%w: a rejected manifest cannot pass compliance review", ErrInvalidInput)
+		}
+		if !latest.IsValid() {
+			return model.ComplianceCheck{}, fmt.Errorf("%w: 快照 v%d 已记录发运前失效（%s），不能通过", ErrSnapshotInvalid, latest.Version, latest.InvalidReason)
+		}
+		if latest.Stage != model.SnapshotStageSubmission && latest.Stage != model.SnapshotStageDispatch {
+			return model.ComplianceCheck{}, fmt.Errorf("%w: snapshot stage %s cannot support a pass decision", ErrSnapshotInvalid, latest.Stage)
+		}
 	}
 	if strings.TrimSpace(current.Evidence) == "" || strings.TrimSpace(input.Reason) == "" {
 		return model.ComplianceCheck{}, fmt.Errorf("%w: decision evidence and reason are required", ErrInvalidInput)
@@ -123,11 +158,19 @@ func (s *complianceCheckService) Transition(ctx context.Context, id uint, input 
 	current.Status = target
 	current.Version = input.ExpectedVersion + 1
 	current.UpdatedAt = time.Now().UTC()
-	current.DecisionBasis = strings.TrimSpace(input.Reason)
-	if err := s.repository.UpdateAudited(ctx, id, input.ExpectedVersion, &current, newAuditLog(actor, requestID, "transition", "ComplianceCheck", before, target, input.Reason)); err != nil {
+	current.DecisionBasis = fmt.Sprintf("%s（依据冻结资质快照 v%d/%s：%s 证 %s、%s 证 %s，车辆 %d 辆，有效期 %s / %s）",
+		strings.TrimSpace(input.Reason),
+		latest.Version, stageLabel(latest.Stage),
+		latest.GeneratorCode, latest.PermitNumber,
+		latest.CarrierCode, latest.LicenseNumber,
+		latest.VehicleCount,
+		latest.PermitExpiresAt.Format(time.RFC3339),
+		latest.LicenseExpiresAt.Format(time.RFC3339),
+	)
+	if err := s.repository.UpdateAudited(ctx, id, input.ExpectedVersion, &current, newAuditLog(actor, requestID, "transition", "ComplianceCheck", before, target, current.DecisionBasis)); err != nil {
 		return model.ComplianceCheck{}, fmt.Errorf("transition 合规核验: %w", err)
 	}
-	return s.repository.Get(ctx, id)
+	return s.Get(ctx, id)
 }
 
 func (s *complianceCheckService) Delete(ctx context.Context, id uint, actor, requestID string) error {

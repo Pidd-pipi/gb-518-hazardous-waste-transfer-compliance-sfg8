@@ -19,6 +19,11 @@ type ComplianceCheck struct {
 	EffectiveAt   time.Time `json:"effectiveAt"`
 	Evidence      string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode   string    `json:"relatedCode" gorm:"size:64;index"`
+
+	// FrozenSnapshot is the append-only 资质快照 attached to the linked manifest.
+	// Review decisions are made from this frozen data only; later permit/license
+	// changes never mutate it. GORM ignores it because it is hydrated manually.
+	FrozenSnapshot *QualificationSnapshot `json:"frozenSnapshot,omitempty" gorm:"-"`
 }
 
 func (item *ComplianceCheck) GetBase() *BaseModel { return &item.BaseModel }

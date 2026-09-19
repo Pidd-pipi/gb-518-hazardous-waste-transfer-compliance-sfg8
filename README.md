@@ -36,10 +36,14 @@ docker compose down -v --remove-orphans
 | 产废单位 | `WasteGenerator` | `/api/generators` | 许可编号、有效期、废物类别与证据 |
 | 承运资质 | `CarrierProfile` | `/api/carriers` | 许可证、有效期、有效车辆与证据 |
 | 转运清单 | `TransferManifest` | `/api/manifests` | 产废单位、承运方、废物代码、重量与去向 |
-| 合规核验 | `ComplianceCheck` | `/api/checks` | 关联联单、核验清单、证据与决定依据 |
+| 资质快照 | `QualificationSnapshot` | `/api/snapshots/:manifestCode` | 提交/发运时冻结证照编号、状态、有效期、车辆数（只追加） |
+| 合规核验 | `ComplianceCheck` | `/api/checks` | 关联联单、按冻结快照形成核验决定与依据 |
 
 - JWT 登录和 viewer/operator/reviewer/admin 四级 RBAC，后端 middleware、前端守卫、导航与按钮同步生效。
-- 联单提交和发运前会重新核验产废许可为 `active`、承运资质为 `verified`，且双方证照仍在有效期内。
+- **危废联单资质快照闭环**：联单提交（`draft → submitted`）与发运（`submitted → in_transit`）时在同一数据库事务内重新核验产废许可与承运资质，并把双方**证照编号、状态、有效期、证照版本与有效车辆数**冻结为只追加的资质快照（`QualificationSnapshot`）。
+- 发运前任一方证照实时失效或停用：整单拒绝，联单状态与版本号保持不变，同时冻结一张 `valid=false` 的快照并写入失效原因，刷新后即可回读到该失效快照。
+- 快照一经冻结不可修改、不可删除；之后证照编号/状态/有效期/车辆数发生变化都不会改写历史快照。合规核验页**只依据冻结快照**作出决定，页面展示快照版本、双方证照有效期与失效原因。
+- 重复点击或并发提交/发运由「行锁 + 乐观版本号 + 快照唯一索引」保证**只有一个请求成功**，其余返回 409；操作者刷新页面后可回读最新状态与快照。
 - 联单只允许 `draft → submitted → in_transit → received`，`submitted/in_transit` 可转 `rejected`；核验决定不可回退，失败仅可升级复核。
 - 已提交联单和已决定核验不可编辑或删除；写入使用乐观锁。
 - 建档、许可/证据更新、状态变化和删除与审计日志在同一数据库事务中提交，审计保留 actor 与 request ID。

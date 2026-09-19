@@ -8,6 +8,7 @@ import (
 	"github.com/blueship581/hazardous-waste-transfer-compliance/backend/internal/dto"
 	"github.com/blueship581/hazardous-waste-transfer-compliance/backend/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var ErrVersionConflict = errors.New("record was changed by another request")
@@ -22,14 +23,42 @@ type Page[T any] struct {
 // Store centralizes consistent paging and optimistic-lock semantics while
 // concrete repository files retain an explicit boundary for each aggregate.
 type Store[T any] struct {
-	db *gorm.DB
+	db            *gorm.DB
+	supportsLocks bool
 }
 
-func NewStore[T any](db *gorm.DB) *Store[T] { return &Store[T]{db: db} }
+func NewStore[T any](db *gorm.DB) *Store[T] {
+	return &Store[T]{db: db, supportsLocks: db.Dialector.Name() != "sqlite"}
+}
+
+// GetForUpdate reads a row with a pessimistic write lock (SELECT ... FOR UPDATE)
+// so concurrent state-machine transitions serialize on the same aggregate.
+// SQLite serializes writes on its own and has no row-lock syntax, so there the
+// clause is omitted. Must be called inside a transaction.
+func (s *Store[T]) GetForUpdate(ctx context.Context, id uint) (T, error) {
+	var item T
+	query := conn(ctx, s.db)
+	if s.supportsLocks {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.First(&item, id).Error
+	return item, err
+}
+
+// FindByCodeForUpdate is the code-keyed variant of GetForUpdate.
+func (s *Store[T]) FindByCodeForUpdate(ctx context.Context, code string) (T, error) {
+	var item T
+	query := conn(ctx, s.db)
+	if s.supportsLocks {
+		query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	err := query.Where("UPPER(code) = ?", strings.ToUpper(strings.TrimSpace(code))).First(&item).Error
+	return item, err
+}
 
 func (s *Store[T]) List(ctx context.Context, query dto.PageQuery) (Page[T], error) {
 	page, pageSize := normalizePage(query.Page, query.PageSize)
-	db := s.db.WithContext(ctx).Model(new(T))
+	db := conn(ctx, s.db).Model(new(T))
 	if search := strings.TrimSpace(strings.ToLower(query.Search)); search != "" {
 		wildcard := "%" + search + "%"
 		db = db.Where("LOWER(code) LIKE ? OR LOWER(name) LIKE ?", wildcard, wildcard)
@@ -49,23 +78,23 @@ func (s *Store[T]) List(ctx context.Context, query dto.PageQuery) (Page[T], erro
 
 func (s *Store[T]) Get(ctx context.Context, id uint) (T, error) {
 	var item T
-	err := s.db.WithContext(ctx).First(&item, id).Error
+	err := conn(ctx, s.db).First(&item, id).Error
 	return item, err
 }
 
 func (s *Store[T]) FindByCode(ctx context.Context, code string) (T, error) {
 	var item T
-	err := s.db.WithContext(ctx).Where("UPPER(code) = ?", strings.ToUpper(strings.TrimSpace(code))).First(&item).Error
+	err := conn(ctx, s.db).Where("UPPER(code) = ?", strings.ToUpper(strings.TrimSpace(code))).First(&item).Error
 	return item, err
 }
 
 func (s *Store[T]) Create(ctx context.Context, item *T) error {
-	return s.db.WithContext(ctx).Create(item).Error
+	return conn(ctx, s.db).Create(item).Error
 }
 
 func (s *Store[T]) CreateAudited(ctx context.Context, item *T, audit *model.AuditLog) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(item).Error; err != nil {
+	return inUnitOfWork(ctx, s.db, func(q *gorm.DB) error {
+		if err := q.Create(item).Error; err != nil {
 			return err
 		}
 		record, ok := any(item).(model.DomainRecord)
@@ -73,21 +102,21 @@ func (s *Store[T]) CreateAudited(ctx context.Context, item *T, audit *model.Audi
 			return errors.New("audited model does not expose its base record")
 		}
 		audit.EntityID = record.GetBase().ID
-		return tx.Create(audit).Error
+		return q.Create(audit).Error
 	})
 }
 
 func (s *Store[T]) Update(ctx context.Context, id, expectedVersion uint, item *T) error {
-	return updateRecord(s.db.WithContext(ctx), id, expectedVersion, item)
+	return updateRecord(conn(ctx, s.db), id, expectedVersion, item)
 }
 
 func (s *Store[T]) UpdateAudited(ctx context.Context, id, expectedVersion uint, item *T, audit *model.AuditLog) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := updateRecord(tx, id, expectedVersion, item); err != nil {
+	return inUnitOfWork(ctx, s.db, func(q *gorm.DB) error {
+		if err := updateRecord(q, id, expectedVersion, item); err != nil {
 			return err
 		}
 		audit.EntityID = id
-		return tx.Create(audit).Error
+		return q.Create(audit).Error
 	})
 }
 
@@ -105,16 +134,16 @@ func updateRecord[T any](db *gorm.DB, id, expectedVersion uint, item *T) error {
 }
 
 func (s *Store[T]) Delete(ctx context.Context, id uint) error {
-	return deleteRecord[T](s.db.WithContext(ctx), id)
+	return deleteRecord[T](conn(ctx, s.db), id)
 }
 
 func (s *Store[T]) DeleteAudited(ctx context.Context, id uint, audit *model.AuditLog) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := deleteRecord[T](tx, id); err != nil {
+	return inUnitOfWork(ctx, s.db, func(q *gorm.DB) error {
+		if err := deleteRecord[T](q, id); err != nil {
 			return err
 		}
 		audit.EntityID = id
-		return tx.Create(audit).Error
+		return q.Create(audit).Error
 	})
 }
 
@@ -130,7 +159,7 @@ func deleteRecord[T any](db *gorm.DB, id uint) error {
 }
 
 func (s *Store[T]) CountByStatus(ctx context.Context) (map[string]int64, error) {
-	rows, err := s.db.WithContext(ctx).Model(new(T)).
+	rows, err := conn(ctx, s.db).Model(new(T)).
 		Select("status, COUNT(*) AS total").Group("status").Rows()
 	if err != nil {
 		return nil, err

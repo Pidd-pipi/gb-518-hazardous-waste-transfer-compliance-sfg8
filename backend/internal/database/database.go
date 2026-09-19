@@ -40,6 +40,23 @@ func Open(ctx context.Context, cfg config.Config, log *slog.Logger) (*gorm.DB, *
 		if err == nil {
 			sqlDB, dbErr := db.DB()
 			if dbErr == nil && sqlDB.PingContext(ctx) == nil {
+				if cfg.DatabaseDriver == "sqlite" {
+					// Dev mode: serialize all access through one connection. WAL
+					// plus a busy timeout still lets readers coexist, but a single
+					// pooled connection guarantees concurrent state-machine
+					// transactions wait their turn rather than failing with
+					// SQLITE_BUSY. Production uses Postgres row locks.
+					for _, pragma := range []string{
+						"PRAGMA journal_mode=WAL",
+						"PRAGMA busy_timeout=5000",
+						"PRAGMA foreign_keys=ON",
+					} {
+						if pragmaErr := db.Exec(pragma).Error; pragmaErr != nil {
+							log.Warn("sqlite pragma failed", "pragma", pragma, "error", pragmaErr)
+						}
+					}
+					sqlDB.SetMaxOpenConns(1)
+				}
 				break
 			}
 			if dbErr != nil {
@@ -80,6 +97,7 @@ func migrate(db *gorm.DB) error {
 		&model.WasteGenerator{},
 		&model.CarrierProfile{},
 		&model.TransferManifest{},
+		&model.QualificationSnapshot{},
 		&model.ComplianceCheck{},
 	)
 }
@@ -114,6 +132,10 @@ func Seed(ctx context.Context, db *gorm.DB) error {
 	}
 
 	if err := seedTransferManifest(ctx, db); err != nil {
+		return err
+	}
+
+	if err := seedQualificationSnapshot(ctx, db); err != nil {
 		return err
 	}
 
@@ -209,6 +231,48 @@ func seedTransferManifest(ctx context.Context, db *gorm.DB) error {
 			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-03"},
 	}
 	return db.WithContext(ctx).Create(&items).Error
+}
+
+func seedQualificationSnapshot(ctx context.Context, db *gorm.DB) error {
+	var count int64
+	if err := db.WithContext(ctx).Model(&model.QualificationSnapshot{}).Count(&count).Error; err != nil || count > 0 {
+		return err
+	}
+	var generator model.WasteGenerator
+	if err := db.WithContext(ctx).Where("code = ?", "WG-001").First(&generator).Error; err != nil {
+		return err
+	}
+	var carrier model.CarrierProfile
+	if err := db.WithContext(ctx).Where("code = ?", "CP-002").First(&carrier).Error; err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	snapshots := make([]model.QualificationSnapshot, 0, 3)
+	appendSnapshot := func(manifestCode string, stage string, version uint, frozenAt time.Time) {
+		var manifest model.TransferManifest
+		if err := db.WithContext(ctx).Where("code = ?", manifestCode).First(&manifest).Error; err != nil {
+			return
+		}
+		valid := true
+		snapshots = append(snapshots, model.QualificationSnapshot{
+			ManifestID: manifest.ID, ManifestCode: manifestCode, Stage: stage, Version: version, Valid: &valid,
+			GeneratorCode: generator.Code, GeneratorStatus: generator.Status, PermitNumber: generator.PermitNumber,
+			PermitVersion: generator.Version, PermitExpiresAt: generator.PermitExpiresAt.UTC(),
+			CarrierCode: carrier.Code, CarrierStatus: carrier.Status, LicenseNumber: carrier.LicenseNumber,
+			LicenseVersion: carrier.Version, LicenseExpiresAt: carrier.LicenseExpiresAt.UTC(), VehicleCount: carrier.VehicleCount,
+			FrozenAt: frozenAt,
+		})
+	}
+	// TM-002 is submitted: one valid submission snapshot. TM-003 is in transit:
+	// submission + dispatch snapshots. This keeps demo 核验页 decisions grounded
+	// in frozen snapshots instead of live licenses.
+	appendSnapshot("TM-002", model.SnapshotStageSubmission, 1, now.Add(-2*time.Hour))
+	appendSnapshot("TM-003", model.SnapshotStageSubmission, 1, now.Add(-6*time.Hour))
+	appendSnapshot("TM-003", model.SnapshotStageDispatch, 2, now.Add(-5*time.Hour))
+	if len(snapshots) == 0 {
+		return nil
+	}
+	return db.WithContext(ctx).Create(&snapshots).Error
 }
 
 func seedComplianceCheck(ctx context.Context, db *gorm.DB) error {

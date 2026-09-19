@@ -1,4 +1,26 @@
 
+export interface QualificationSnapshot {
+  id: number;
+  manifestId: number;
+  manifestCode: string;
+  stage: 'submission' | 'dispatch' | string;
+  version: number;
+  valid: boolean;
+  invalidReason?: string;
+  generatorCode: string;
+  generatorStatus: string;
+  permitNumber: string;
+  permitVersion: number;
+  permitExpiresAt: string;
+  carrierCode: string;
+  carrierStatus: string;
+  licenseNumber: string;
+  licenseVersion: number;
+  licenseExpiresAt: string;
+  vehicleCount: number;
+  frozenAt: string;
+}
+
 export interface DomainRecord {
   id: number;
   code: string;
@@ -29,6 +51,8 @@ export interface DomainRecord {
 	manifestCode?: string;
 	checklist?: string;
 	decisionBasis?: string;
+  latestSnapshot?: QualificationSnapshot | null;
+  frozenSnapshot?: QualificationSnapshot | null;
   createdAt: string;
   updatedAt: string;
 }

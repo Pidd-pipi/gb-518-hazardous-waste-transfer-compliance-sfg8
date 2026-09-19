@@ -29,18 +29,22 @@ func New(cfg config.Config, db *gorm.DB, redisClient *redis.Client, logger *slog
 
 	securityRepository := repository.NewSecurityRepository(db)
 	securityService := service.NewSecurityService(securityRepository, cfg)
+	txManager := repository.NewTxManager(db)
 	wasteGeneratorRepository := repository.NewWasteGeneratorRepository(db)
 	carrierProfileRepository := repository.NewCarrierProfileRepository(db)
 	transferManifestRepository := repository.NewTransferManifestRepository(db)
+	qualificationSnapshotRepository := repository.NewQualificationSnapshotRepository(db)
 	complianceCheckRepository := repository.NewComplianceCheckRepository(db)
 	wasteGeneratorService := service.NewWasteGeneratorService(wasteGeneratorRepository, securityService)
 	carrierProfileService := service.NewCarrierProfileService(carrierProfileRepository, securityService)
-	transferManifestService := service.NewTransferManifestService(transferManifestRepository, wasteGeneratorRepository, carrierProfileRepository)
-	complianceCheckService := service.NewComplianceCheckService(complianceCheckRepository, transferManifestRepository)
+	qualificationSnapshotService := service.NewQualificationSnapshotService(qualificationSnapshotRepository, wasteGeneratorRepository, carrierProfileRepository)
+	transferManifestService := service.NewTransferManifestService(transferManifestRepository, wasteGeneratorRepository, carrierProfileRepository, qualificationSnapshotService, txManager)
+	complianceCheckService := service.NewComplianceCheckService(complianceCheckRepository, transferManifestRepository, qualificationSnapshotService)
 	wasteGeneratorHandler := handler.NewWasteGeneratorHandler(wasteGeneratorService)
 	carrierProfileHandler := handler.NewCarrierProfileHandler(carrierProfileService)
 	transferManifestHandler := handler.NewTransferManifestHandler(transferManifestService)
 	complianceCheckHandler := handler.NewComplianceCheckHandler(complianceCheckService)
+	qualificationSnapshotHandler := handler.NewQualificationSnapshotHandler(qualificationSnapshotService)
 	systemHandler := handler.NewSystemHandler(securityService, wasteGeneratorService, carrierProfileService, transferManifestService, complianceCheckService, db, redisClient)
 
 	engine.GET("/healthz", systemHandler.Health)
@@ -59,6 +63,7 @@ func New(cfg config.Config, db *gorm.DB, redisClient *redis.Client, logger *slog
 	carrierProfileHandler.Register(api)
 	transferManifestHandler.Register(api)
 	complianceCheckHandler.Register(api)
+	qualificationSnapshotHandler.Register(api)
 
 	engine.NoRoute(func(c *gin.Context) {
 		if c.Request.Method == http.MethodOptions {

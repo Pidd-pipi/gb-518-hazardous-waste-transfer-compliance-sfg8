@@ -23,6 +23,7 @@ func (h *TransferManifestHandler) Register(group *gin.RouterGroup) {
 	resource := group.Group("/manifests")
 	resource.GET("", h.list)
 	resource.GET("/:id", h.get)
+	resource.GET("/:id/snapshots", h.snapshots)
 	resource.POST("", middleware.RequireMinimumRole(model.RoleOperator), h.create)
 	resource.PUT("/:id", middleware.RequireMinimumRole(model.RoleOperator), h.update)
 	resource.POST("/:id/transition", middleware.RequireMinimumRole(model.RoleOperator), h.transition)
@@ -50,6 +51,24 @@ func (h *TransferManifestHandler) get(c *gin.Context) {
 		return
 	}
 	util.OK(c, item)
+}
+
+func (h *TransferManifestHandler) snapshots(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	item, err := h.service.Get(c.Request.Context(), id)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	history, err := h.service.SnapshotHistory(c.Request.Context(), item.Code)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	util.OK(c, gin.H{"manifestCode": item.Code, "latest": item.LatestSnapshot, "history": history})
 }
 
 func (h *TransferManifestHandler) create(c *gin.Context) {

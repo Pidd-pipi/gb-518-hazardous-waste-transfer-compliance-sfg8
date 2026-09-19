@@ -5,19 +5,21 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatInputModule } from '@angular/material/input';
 import { useAuth } from '../hooks/use-auth';
 import { createPagination } from '../hooks/use-pagination';
+import { getSnapshotHistory } from '../api/qualification-snapshot';
 import type { EntityStore } from '../stores/factory';
-import type { DomainRecord, EntityConfig } from '../types/domain';
+import type { DomainRecord, EntityConfig, QualificationSnapshot } from '../types/domain';
 import { TRANSITIONS } from '../types/status';
 import { formatDate } from '../utils/format';
 import { ConfirmDialogComponent } from './common/confirm-dialog.component';
 import { LicensePanelComponent } from './common/license-panel.component';
 import { MetricCardComponent } from './common/metric-card.component';
+import { SnapshotHistoryDialogComponent } from './common/snapshot-history-dialog.component';
 import { StatusBadgeComponent } from './common/status-badge.component';
 
 @Component({
   selector: 'app-entity-page',
   standalone: true,
-  imports: [CommonModule, AsyncPipe, FormsModule, MatButtonModule, MatInputModule, StatusBadgeComponent, MetricCardComponent, ConfirmDialogComponent, LicensePanelComponent],
+  imports: [CommonModule, AsyncPipe, FormsModule, MatButtonModule, MatInputModule, StatusBadgeComponent, MetricCardComponent, ConfirmDialogComponent, LicensePanelComponent, SnapshotHistoryDialogComponent],
   template: `
     <main class="workspace" *ngIf="store.state$ | async as state">
       <header class="page-header">
@@ -48,7 +50,19 @@ import { StatusBadgeComponent } from './common/status-badge.component';
               <td><strong>{{ item.code }}</strong></td>
               <td>{{ item.name }}<small>{{ item.facility }}</small></td>
               <td><app-status-badge [status]="item.status" /></td>
-              <td><span class="domain-detail">{{ domainDetail(item) }}</span><small>{{ item.evidence }}</small></td>
+              <td><span class="domain-detail">{{ domainDetail(item) }}</span><small>{{ item.evidence }}</small>
+                <button
+                  *ngIf="showsSnapshots()"
+                  type="button"
+                  class="snapshot-chip"
+                  [class.snapshot-chip--valid]="rowSnapshot(item)?.valid"
+                  [class.snapshot-chip--invalid]="rowSnapshot(item) && !rowSnapshot(item)?.valid"
+                  [class.snapshot-chip--none]="!rowSnapshot(item)"
+                  (click)="openSnapshots(item)"
+                >
+                  {{ rowSnapshot(item) ? '资质快照 v' + rowSnapshot(item)!.version + (rowSnapshot(item)!.valid ? ' · 冻结有效' : ' · 发运前失效') : '暂无冻结快照' }}
+                </button>
+              </td>
               <td><span [class]="'risk risk--' + item.riskLevel">{{ item.riskLevel }}</span></td>
               <td>{{ item.owner }}</td>
               <td>{{ item.metricValue }} {{ item.metricUnit }}</td>
@@ -76,9 +90,18 @@ import { StatusBadgeComponent } from './common/status-badge.component';
         <p>确认创建一条包含责任人、业务关联、风险和证据信息的记录。</p>
       </app-confirm-dialog>
       <app-confirm-dialog [open]="!!pending" title="确认状态迁移" (cancel)="closeTransition()" (confirm)="confirmTransition()">
-        <p>状态迁移会校验关联资质，并与请求 ID 审计记录在同一事务中保存。</p>
+        <p>提交/发运将实时核验产废许可与承运资质，并把证照编号、状态、有效期与车辆数冻结为快照；发运前失效会整单拒绝且联单状态不变。</p>
         <strong>{{ pending?.item?.status }} → {{ pending?.status }}</strong>
       </app-confirm-dialog>
+
+      <app-snapshot-history-dialog
+        [open]="snapshotDialog.open"
+        [manifestCode]="snapshotDialog.manifestCode"
+        [history]="snapshotDialog.history"
+        [loading]="snapshotDialog.loading"
+        [error]="snapshotDialog.error"
+        (close)="closeSnapshots()"
+      />
     </main>
   `
 })
@@ -91,6 +114,9 @@ export class EntityPageComponent implements OnInit {
   search = '';
   showCreate = false;
   pending: { item: DomainRecord; status: string } | null = null;
+  snapshotDialog: { open: boolean; manifestCode: string; history: QualificationSnapshot[]; loading: boolean; error: string } = {
+    open: false, manifestCode: '', history: [], loading: false, error: '',
+  };
 
   constructor(private readonly changeDetector: ChangeDetectorRef) {}
 
@@ -99,6 +125,36 @@ export class EntityPageComponent implements OnInit {
   highRisk(items: DomainRecord[]): number { return items.filter((item) => ['high', 'critical'].includes(item.riskLevel)).length; }
   statusCount(items: DomainRecord[]): number { return new Set(items.map((item) => item.status)).size; }
   isLicensePage(): boolean { return this.config.key === 'wasteGenerator' || this.config.key === 'carrierProfile'; }
+  showsSnapshots(): boolean { return this.config.key === 'transferManifest' || this.config.key === 'complianceCheck'; }
+  rowSnapshot(item: DomainRecord): QualificationSnapshot | null | undefined {
+    if (this.config.key === 'transferManifest') return item.latestSnapshot;
+    return item.frozenSnapshot;
+  }
+  snapshotManifestCode(item: DomainRecord): string {
+    return this.config.key === 'transferManifest' ? item.code : (item.manifestCode || '');
+  }
+
+  async openSnapshots(item: DomainRecord): Promise<void> {
+    const manifestCode = this.snapshotManifestCode(item);
+    this.snapshotDialog = { open: true, manifestCode, history: [], loading: true, error: '' };
+    this.changeDetector.detectChanges();
+    try {
+      const result = await getSnapshotHistory(manifestCode);
+      this.snapshotDialog = { open: true, manifestCode, history: result.data.history || [], loading: false, error: '' };
+    } catch (error) {
+      this.snapshotDialog = {
+        open: true, manifestCode, history: [], loading: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      this.changeDetector.detectChanges();
+    }
+  }
+
+  closeSnapshots(): void {
+    this.snapshotDialog = { ...this.snapshotDialog, open: false };
+    this.changeDetector.detectChanges();
+  }
   canTransition(): boolean { return this.auth.hasMinimumRole(this.config.transitionRole); }
   transitions(item: DomainRecord): readonly string[] { return TRANSITIONS[this.config.key]?.[item.status] ?? []; }
 
@@ -159,11 +215,20 @@ export class EntityPageComponent implements OnInit {
 
   async confirmTransition(): Promise<void> {
     if (!this.pending) return;
+    const pending = this.pending;
     try {
-      await this.store.transition(this.config.path, this.pending.item, this.pending.status);
+      await this.store.transition(this.config.path, pending.item, pending.status);
       this.pending = null;
-    } catch { /* Store exposes the request error in its observable state. */ }
-    finally { this.changeDetector.detectChanges(); }
+    } catch {
+      // A refused dispatch still freezes an invalid snapshot server-side; keep
+      // the dialog on the error so the operator can read the reason, then
+      // refresh the list so the unchanged row carries its new frozen snapshot.
+      this.pending = null;
+    }
+    finally {
+      await this.load();
+      this.changeDetector.detectChanges();
+    }
   }
 
   private async load(): Promise<void> {

@@ -73,3 +73,29 @@ td small { display: block; color: #7d8d97; margin-top: 4px; }
 @media (max-width: 1100px) { .evidence-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } .evidence-strip article:nth-child(2) { border-right: 0; } .audit-list article { grid-template-columns: 150px 160px 120px 1fr; } .audit-list small { grid-column: 1 / -1; } }
 @media (max-width: 900px) { .app-shell { grid-template-columns: 1fr; } aside { position: static; height: auto; padding: 18px; } .brand { padding-bottom: 14px; } nav { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 14px 0 0; } nav a { padding: 10px 8px; font-size: 13px; } .user-panel { display: none; } .topbar { padding: 0 18px; } .metrics { grid-template-columns: 1fr; } .workspace { padding: 18px; } .page-header { flex-direction: column; } .audit-list article { grid-template-columns: 1fr; } }
 @media (max-width: 560px) { nav { grid-template-columns: repeat(2, minmax(0, 1fr)); } .topbar { height: 48px; font-size: 12px; } .workspace { padding: 14px; } .page-header h1 { font-size: 23px; } .page-header button { width: 100%; } .toolbar { display: grid; grid-template-columns: 1fr 1fr; } .toolbar input { min-width: 0; max-width: none; grid-column: 1 / -1; } .table-shell table { min-width: 1120px; } .table-shell th:nth-child(1), .table-shell td:nth-child(1) { min-width: 130px; } .table-shell th:nth-child(2), .table-shell td:nth-child(2) { min-width: 190px; } .table-shell th:nth-child(4), .table-shell td:nth-child(4) { min-width: 250px; } .evidence-strip { grid-template-columns: 1fr; } .evidence-strip article, .evidence-strip article:nth-child(2) { border-right: 0; border-bottom: 1px solid #dbe4e8; } .evidence-strip article:last-child { border-bottom: 0; } .login-page { padding: 14px; } .login-panel { padding: 22px; } }
+.snapshot-chip { display: inline-flex; align-items: center; gap: 5px; margin-top: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 750; cursor: pointer; border: 1px solid transparent; }
+.snapshot-chip--valid { color: #176c55; background: #dff3ec; border-color: #9fd7c7; }
+.snapshot-chip--invalid { color: #9d2c37; background: #fde4e6; border-color: #efb3b9; }
+.snapshot-chip--none { color: #6c7e8a; background: #eef2f4; border-color: #d3dde2; }
+.snapshot-panel { border: 1px solid #bfe3d8; border-left: 4px solid #2a9d78; background: #f4fbf8; margin: 12px 0; }
+.snapshot-panel--invalid { border-color: #efb3b9; border-left-color: #c84855; background: #fdf6f6; }
+.snapshot-panel > header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 11px 14px; border-bottom: 1px solid #e3ece8; }
+.snapshot-panel--invalid > header { border-bottom-color: #f1dadd; }
+.snapshot-stage { color: #6c7e8a; font-size: 12px; }
+.snapshot-verdict { margin-left: auto; padding: 3px 10px; border-radius: 3px; font-size: 11px; font-weight: 800; text-transform: uppercase; }
+.snapshot-verdict--valid { color: #176c55; background: #dff3ec; }
+.snapshot-verdict--invalid { color: #9d2c37; background: #fde4e6; }
+.snapshot-grid { display: grid; grid-template-columns: 1fr 1fr; }
+.snapshot-party { padding: 12px 14px; }
+.snapshot-party:first-child { border-right: 1px solid #e3ece8; }
+.snapshot-party h6 { margin: 0 0 8px; font-size: 12px; color: #405866; text-transform: uppercase; letter-spacing: .03em; }
+.snapshot-party dl { margin: 0; display: grid; grid-template-columns: 76px 1fr; gap: 5px 10px; font-size: 13px; }
+.snapshot-party dt { color: #768893; } .snapshot-party dd { margin: 0; color: #22384a; font-weight: 600; overflow-wrap: anywhere; }
+.snapshot-reason { margin: 0; padding: 10px 14px; border-top: 1px solid #f1dadd; color: #9d2c37; font-size: 13px; background: #fbecee; }
+.snapshot-history { display: grid; gap: 10px; max-height: 52vh; overflow-y: auto; padding-right: 4px; }
+.snapshot-history .snapshot-panel { margin: 0; }
+.snapshot-history .snapshot-grid { grid-template-columns: 1fr 1fr; }
+@media (max-width: 720px) { .snapshot-grid, .snapshot-history .snapshot-grid { grid-template-columns: 1fr; } .snapshot-party:first-child { border-right: 0; border-bottom: 1px solid #e3ece8; } .snapshot-verdict { margin-left: 0; } }
+.modal.snapshot-modal { width: min(760px, calc(100vw - 32px)); }
+.snapshot-modal footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.loading-inline { padding: 18px; color: #176c55; font-weight: 650; }

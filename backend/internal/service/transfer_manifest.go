@@ -20,24 +20,39 @@ type TransferManifestService interface {
 	Transition(context.Context, uint, dto.TransitionRequest, string, string) (model.TransferManifest, error)
 	Delete(context.Context, uint, string, string) error
 	StatusCounts(context.Context) (map[string]int64, error)
+	SnapshotHistory(context.Context, string) ([]model.QualificationSnapshot, error)
 }
 
 type transferManifestService struct {
 	repository repository.TransferManifestRepository
 	generators repository.WasteGeneratorRepository
 	carriers   repository.CarrierProfileRepository
+	snapshots  QualificationSnapshotService
+	tx         *repository.TxManager
 }
 
-func NewTransferManifestService(repo repository.TransferManifestRepository, generators repository.WasteGeneratorRepository, carriers repository.CarrierProfileRepository) TransferManifestService {
-	return &transferManifestService{repository: repo, generators: generators, carriers: carriers}
+func NewTransferManifestService(repo repository.TransferManifestRepository, generators repository.WasteGeneratorRepository, carriers repository.CarrierProfileRepository, snapshots QualificationSnapshotService, tx *repository.TxManager) TransferManifestService {
+	return &transferManifestService{repository: repo, generators: generators, carriers: carriers, snapshots: snapshots, tx: tx}
 }
 
 func (s *transferManifestService) List(ctx context.Context, query dto.PageQuery) (repository.Page[model.TransferManifest], error) {
-	return s.repository.List(ctx, query)
+	page, err := s.repository.List(ctx, query)
+	if err != nil {
+		return page, err
+	}
+	s.snapshots.HydrateManifests(ctx, page.Items)
+	return page, nil
 }
 
 func (s *transferManifestService) Get(ctx context.Context, id uint) (model.TransferManifest, error) {
-	return s.repository.Get(ctx, id)
+	item, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return model.TransferManifest{}, err
+	}
+	if err := s.snapshots.HydrateManifest(ctx, &item); err != nil {
+		return model.TransferManifest{}, err
+	}
+	return item, nil
 }
 
 func (s *transferManifestService) Create(ctx context.Context, input dto.CreateTransferManifest, actor, requestID string) (model.TransferManifest, error) {
@@ -107,31 +122,106 @@ func (s *transferManifestService) Update(ctx context.Context, id uint, input dto
 	if err := s.repository.UpdateAudited(ctx, id, input.ExpectedVersion, &current, newAuditLog(actor, requestID, "update", "TransferManifest", current.Status, current.Status, "updated draft manifest and evidence")); err != nil {
 		return model.TransferManifest{}, fmt.Errorf("update 转运清单: %w", err)
 	}
-	return s.repository.Get(ctx, id)
+	return s.Get(ctx, id)
 }
 
 func (s *transferManifestService) Transition(ctx context.Context, id uint, input dto.TransitionRequest, actor, requestID string) (model.TransferManifest, error) {
-	current, err := s.repository.Get(ctx, id)
+	target := strings.TrimSpace(input.Status)
+
+	var snapshot *model.QualificationSnapshot
+	var qualificationErr error
+	err := s.tx.InTx(ctx, func(txCtx context.Context) error {
+		// Read the manifest with a row lock inside the transaction: duplicate and
+		// concurrent requests serialize here. The optimistic-version check runs
+		// before the state-machine check, so a losing request always reports a
+		// conflict (409) regardless of the new state it happens to observe.
+		locked, lockErr := s.repository.GetForUpdate(txCtx, id)
+		if lockErr != nil {
+			return lockErr
+		}
+		current := locked
+		if current.Version != input.ExpectedVersion {
+			return repository.ErrVersionConflict
+		}
+		if !constants.CanTransition(constants.TransferManifestTransitions, current.Status, target) {
+			return fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
+		}
+
+		if target == "submitted" || target == "in_transit" {
+			stage := model.SnapshotStageSubmission
+			if target == "in_transit" {
+				stage = model.SnapshotStageDispatch
+			}
+			frozen, freezeErr := s.snapshots.FreezeForTransition(txCtx, current, stage)
+			if freezeErr != nil {
+				return freezeErr
+			}
+			snapshot = frozen
+			if !frozen.IsValid() {
+				// 发运前实时失效/停用：冻结 valid=false 快照后返回业务错误。联单状态与
+				// version 保持不变（事务正常提交，只落库快照与审计），整单拒绝。
+				qualificationErr = fmt.Errorf("%w: %s", ErrQualificationInvalid, frozen.InvalidReason)
+				if auditErr := s.appendAudit(txCtx, actor, requestID, current.Status, target, stage, frozen); auditErr != nil {
+					return auditErr
+				}
+				return nil
+			}
+		}
+
+		before := current.Status
+		current.Status = target
+		current.Version = input.ExpectedVersion + 1
+		current.UpdatedAt = time.Now().UTC()
+		detail := input.Reason
+		if snapshot != nil {
+			detail = fmt.Sprintf("%s（资质快照 v%d：%s/%s 有效）", input.Reason, snapshot.Version, snapshot.PermitNumber, snapshot.LicenseNumber)
+		}
+		if updateErr := s.repository.UpdateAudited(txCtx, id, input.ExpectedVersion, &current,
+			newAuditLog(actor, requestID, "transition", "TransferManifest", before, target, detail)); updateErr != nil {
+			return fmt.Errorf("transition 转运清单: %w", updateErr)
+		}
+		if snapshot != nil {
+			if auditErr := s.appendAudit(txCtx, actor, requestID, before, target, snapshot.Stage, snapshot); auditErr != nil {
+				return auditErr
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return model.TransferManifest{}, err
 	}
-	target := strings.TrimSpace(input.Status)
-	if !constants.CanTransition(constants.TransferManifestTransitions, current.Status, target) {
-		return model.TransferManifest{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
-	}
-	if target == "submitted" || target == "in_transit" {
-		if err := s.validateLinkedParties(ctx, current); err != nil {
-			return model.TransferManifest{}, err
+	if qualificationErr != nil {
+		// Status deliberately unchanged: re-read so the client can 刷新后回读 the
+		// same draft/submitted row together with the newly frozen failure snapshot.
+		refreshed, refreshErr := s.Get(ctx, id)
+		if refreshErr != nil {
+			return model.TransferManifest{}, qualificationErr
 		}
+		return refreshed, qualificationErr
 	}
-	before := current.Status
-	current.Status = target
-	current.Version = input.ExpectedVersion + 1
-	current.UpdatedAt = time.Now().UTC()
-	if err := s.repository.UpdateAudited(ctx, id, input.ExpectedVersion, &current, newAuditLog(actor, requestID, "transition", "TransferManifest", before, target, input.Reason)); err != nil {
-		return model.TransferManifest{}, fmt.Errorf("transition 转运清单: %w", err)
+	return s.Get(ctx, id)
+}
+
+// appendAudit records that a qualification snapshot was frozen. For valid moves
+// this complements the state-transition audit entry; for rejected dispatches it
+// is the only audit entry because the manifest status did not change.
+func (s *transferManifestService) appendAudit(ctx context.Context, actor, requestID, before, after, stage string, snapshot *model.QualificationSnapshot) error {
+	action := "qualification_frozen"
+	detail := fmt.Sprintf("冻结%s资质快照 v%d（valid=%t）", stageLabel(stage), snapshot.Version, snapshot.IsValid())
+	if !snapshot.IsValid() {
+		detail = fmt.Sprintf("冻结%s资质快照 v%d（整单拒绝：%s）", stageLabel(stage), snapshot.Version, snapshot.InvalidReason)
+		after = before
 	}
-	return s.repository.Get(ctx, id)
+	audit := newAuditLog(actor, requestID, action, "QualificationSnapshot", before, after, detail)
+	audit.EntityID = snapshot.ManifestID
+	return s.repository.AppendAudit(ctx, audit)
+}
+
+func stageLabel(stage string) string {
+	if stage == model.SnapshotStageDispatch {
+		return "发运"
+	}
+	return "提交"
 }
 
 func (s *transferManifestService) Delete(ctx context.Context, id uint, actor, requestID string) error {
@@ -149,22 +239,12 @@ func (s *transferManifestService) StatusCounts(ctx context.Context) (map[string]
 	return s.repository.CountByStatus(ctx)
 }
 
-func (s *transferManifestService) validateLinkedParties(ctx context.Context, manifest model.TransferManifest) error {
-	generator, err := s.generators.FindByCode(ctx, manifest.GeneratorCode)
+func (s *transferManifestService) SnapshotHistory(ctx context.Context, manifestCode string) ([]model.QualificationSnapshot, error) {
+	history, err := s.snapshots.ListByManifestCode(ctx, manifestCode)
 	if err != nil {
-		return fmt.Errorf("%w: linked generator is unavailable", ErrInvalidInput)
+		return nil, err
 	}
-	if generator.Status != "active" || !generator.PermitExpiresAt.After(time.Now().UTC()) {
-		return fmt.Errorf("%w: generator permit must be active and unexpired", ErrInvalidInput)
-	}
-	carrier, err := s.carriers.FindByCode(ctx, manifest.CarrierCode)
-	if err != nil {
-		return fmt.Errorf("%w: linked carrier is unavailable", ErrInvalidInput)
-	}
-	if carrier.Status != "verified" || !carrier.LicenseExpiresAt.After(time.Now().UTC()) {
-		return fmt.Errorf("%w: carrier license must be verified and unexpired", ErrInvalidInput)
-	}
-	return nil
+	return history, nil
 }
 
 func validateTransferManifestBusinessFields(code, name, facility, owner, generatorCode, carrierCode, wasteCode, destination, evidence string, quantityKg float64) error {
