@@ -13,6 +13,7 @@ type TransferManifestRepository interface {
 	List(context.Context, dto.PageQuery) (Page[model.TransferManifest], error)
 	Get(context.Context, uint) (model.TransferManifest, error)
 	FindByCode(context.Context, string) (model.TransferManifest, error)
+	ListByCodes(context.Context, []string) ([]model.TransferManifest, error)
 	Create(context.Context, *model.TransferManifest) error
 	CreateAudited(context.Context, *model.TransferManifest, *model.AuditLog) error
 	Update(context.Context, uint, uint, *model.TransferManifest) error
@@ -38,6 +39,9 @@ func (r *transferManifestRepository) Get(ctx context.Context, id uint) (model.Tr
 }
 func (r *transferManifestRepository) FindByCode(ctx context.Context, code string) (model.TransferManifest, error) {
 	return r.store.FindByCode(ctx, code)
+}
+func (r *transferManifestRepository) ListByCodes(ctx context.Context, codes []string) ([]model.TransferManifest, error) {
+	return r.store.ListByCodes(ctx, codes)
 }
 func (r *transferManifestRepository) Create(ctx context.Context, item *model.TransferManifest) error {
 	return r.store.Create(ctx, item)

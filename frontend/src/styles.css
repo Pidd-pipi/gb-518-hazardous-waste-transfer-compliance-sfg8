@@ -32,6 +32,7 @@ table { width: 100%; border-collapse: collapse; }
 th { background: #edf2f4; color: #4f6370; font-size: 12px; text-align: left; padding: 11px 12px; white-space: nowrap; }
 td { border-top: 1px solid #e5ebee; padding: 13px 12px; vertical-align: middle; font-size: 14px; }
 td small { display: block; color: #7d8d97; margin-top: 4px; }
+td small.snapshot-invalid { color: #a3313d; font-weight: 700; }
 .domain-detail { display: block; min-width: 170px; color: #284b60; font-weight: 650; }
 .actions { min-width: 116px; }
 .actions .table-action { display: block; text-align: left; white-space: nowrap; }

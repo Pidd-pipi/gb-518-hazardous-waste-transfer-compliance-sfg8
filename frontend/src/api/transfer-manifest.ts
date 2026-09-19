@@ -1,6 +1,6 @@
 
 import { request } from './client';
-import type { DomainRecord } from '../types/domain';
+import type { DomainRecord, ManifestSnapshot } from '../types/domain';
 
 export async function listTransferManifest(page = 1, pageSize = 20, search = '') {
   return request<DomainRecord[]>(`/manifests?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`);
@@ -12,4 +12,7 @@ export async function transitionTransferManifest(id: number, status: string, exp
   return request<DomainRecord>(`/manifests/${id}/transition`, {
     method: 'POST', body: JSON.stringify({ status, expectedVersion, reason }),
   });
+}
+export async function listManifestSnapshots(codes: string[]) {
+  return request<ManifestSnapshot[]>(`/manifests/snapshots?codes=${encodeURIComponent(codes.join(','))}`);
 }

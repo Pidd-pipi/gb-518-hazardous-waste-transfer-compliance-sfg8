@@ -1,6 +1,30 @@
 # 验证记录
 
-验证日期：2026-08-22（Asia/Shanghai）
+## 资质快照闭环补齐（2026-09-19，Asia/Shanghai）
+
+本次变更从零补齐危废联单的资质快照闭环，验证环境为本机直接运行（SQLite 开发模式，无 Docker）。
+
+| 检查 | 结果 |
+|---|---|
+| `go build ./...` / `go vet ./...` / `gofmt` | 通过 |
+| `go test ./...` | 通过（含新增 `TestQualificationSnapshotClosedLoop`） |
+| `go test -race ./...` | 通过 |
+| 闭环测试 `-count=1` 连续 8 次独立进程运行 | 全部通过，无并发抖动 |
+| `npm run typecheck` / `npm run build` | 通过 |
+| 本地服务全量 API 验收（等价 `scripts/validate.sh` 的 API 段） | 全部通过 |
+
+`TestQualificationSnapshotClosedLoop` 与 API 验收共同覆盖：
+
+- 提交冻结快照 v1：证照编号 `PERMIT-WG-001`/`CARRIER-LIC-002`、状态 `active`/`verified`、有效期与车辆数 16 随联单保存；草稿无快照。
+- 重复创建同一编码返回 409；重复提交返回 422；同一草稿两个并发提交只有一个 200（另一个 409/422），刷新后 GET 可回读快照。
+- 停用产废许可后历史快照不被改写（仍显示冻结时的 `active`）；此时核验通过只按冻结快照判定。
+- 发运前许可实时停用：发运返回 422，联单状态保持 `submitted`，`snapshotInvalidReason` 随快照留存并写入 `dispatch_blocked` 审计（携带请求 ID）。
+- 携带失效原因时核验通过返回 422；许可恢复后发运成功，快照版本递增为 v2 且失效原因清空，随后核验可通过。
+- `GET /api/manifests/snapshots?codes=...` 返回快照版本、有效期与失效原因，供核验页展示。
+
+Docker 与内置 Browser 在本环境不可用，Compose 级验证未在本机执行；`scripts/validate.sh` 已同步加入快照断言，可在具备 Docker 的环境一键复验。
+
+## 基线验证（2026-08-22，Asia/Shanghai）
 
 ## 静态检查与构建
 

@@ -34,6 +34,214 @@ type record struct {
 	Version uint   `json:"version"`
 }
 
+type manifestSnapshotRecord struct {
+	ID                    uint   `json:"id"`
+	Code                  string `json:"code"`
+	Status                string `json:"status"`
+	Version               uint   `json:"version"`
+	SnapshotVersion       uint   `json:"snapshotVersion"`
+	GeneratorPermitNumber string `json:"generatorPermitNumber"`
+	GeneratorPermitStatus string `json:"generatorPermitStatus"`
+	CarrierLicenseNumber  string `json:"carrierLicenseNumber"`
+	CarrierLicenseStatus  string `json:"carrierLicenseStatus"`
+	CarrierVehicleCount   int    `json:"carrierVehicleCount"`
+	SnapshotInvalidReason string `json:"snapshotInvalidReason"`
+}
+
+func decodeManifestSnapshot(t *testing.T, body []byte) manifestSnapshotRecord {
+	t.Helper()
+	var envelope struct {
+		Data manifestSnapshotRecord `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Data.ID == 0 {
+		t.Fatalf("decode manifest snapshot: %v body=%s", err, string(body))
+	}
+	return envelope.Data
+}
+
+func TestQualificationSnapshotClosedLoop(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cfg := testConfig(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	db, _, err := database.Open(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	engine := router.New(cfg, db, nil, logger)
+
+	operator := login(t, engine, "operator")
+	reviewer := login(t, engine, "reviewer")
+
+	// 重复创建同一编码只能成功一次。
+	response, body := request(t, engine, http.MethodPost, "/api/manifests", operator, "snap-create", manifestPayload("TM-SNAP-001", "CP-002"))
+	assertStatus(t, response, http.StatusCreated)
+	manifest := decodeManifestSnapshot(t, body)
+	if manifest.SnapshotVersion != 0 || manifest.SnapshotInvalidReason != "" {
+		t.Fatalf("draft manifest must not carry a snapshot: %+v", manifest)
+	}
+	response, _ = request(t, engine, http.MethodPost, "/api/manifests", operator, "snap-create-duplicate", manifestPayload("TM-SNAP-001", "CP-002"))
+	assertStatus(t, response, http.StatusConflict)
+
+	// 提交时冻结证照编号、状态、有效期和车辆数。
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", manifest.ID), operator, "snap-submit", map[string]any{
+		"status": "submitted", "expectedVersion": manifest.Version, "reason": "freeze qualification snapshot",
+	})
+	assertStatus(t, response, http.StatusOK)
+	manifest = decodeManifestSnapshot(t, body)
+	if manifest.Status != "submitted" || manifest.SnapshotVersion != 1 ||
+		manifest.GeneratorPermitNumber != "PERMIT-WG-001" || manifest.GeneratorPermitStatus != "active" ||
+		manifest.CarrierLicenseNumber != "CARRIER-LIC-002" || manifest.CarrierLicenseStatus != "verified" ||
+		manifest.CarrierVehicleCount != 16 || manifest.SnapshotInvalidReason != "" {
+		t.Fatalf("submit must freeze the qualification snapshot: %+v", manifest)
+	}
+
+	// 重复提交只能成功一次。
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", manifest.ID), operator, "snap-submit-again", map[string]any{
+		"status": "submitted", "expectedVersion": manifest.Version, "reason": "duplicate submit must be rejected",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	// 并发提交同一草稿只能成功一次。
+	response, body = request(t, engine, http.MethodPost, "/api/manifests", operator, "snap-create-concurrent", manifestPayload("TM-SNAP-002", "CP-002"))
+	assertStatus(t, response, http.StatusCreated)
+	concurrent := decodeManifestSnapshot(t, body)
+	type transitionResult struct{ status int }
+	results := make(chan transitionResult, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			res, _ := request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", concurrent.ID), operator, "", map[string]any{
+				"status": "submitted", "expectedVersion": concurrent.Version, "reason": "concurrent submit",
+			})
+			results <- transitionResult{status: res.StatusCode}
+		}()
+	}
+	first, second := <-results, <-results
+	successes := 0
+	for _, res := range []transitionResult{first, second} {
+		if res.status == http.StatusOK {
+			successes++
+		} else if res.status != http.StatusConflict && res.status != http.StatusUnprocessableEntity {
+			t.Fatalf("concurrent submit returned unexpected status %d", res.status)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent submits must succeed exactly once, got %d", successes)
+	}
+
+	// 刷新后可回读冻结快照。
+	response, body = request(t, engine, http.MethodGet, fmt.Sprintf("/api/manifests/%d", concurrent.ID), reviewer, "", nil)
+	assertStatus(t, response, http.StatusOK)
+	if reread := decodeManifestSnapshot(t, body); reread.Status != "submitted" || reread.SnapshotVersion != 1 || reread.GeneratorPermitNumber != "PERMIT-WG-001" {
+		t.Fatalf("snapshot must be re-readable after refresh: %+v", reread)
+	}
+
+	// 快照查询接口返回版本与有效期。
+	response, body = request(t, engine, http.MethodGet, "/api/manifests/snapshots?codes=TM-SNAP-001,TM-SNAP-002", reviewer, "", nil)
+	assertStatus(t, response, http.StatusOK)
+	var snapshots struct {
+		Data []struct {
+			ManifestCode          string `json:"manifestCode"`
+			SnapshotVersion       uint   `json:"snapshotVersion"`
+			GeneratorPermitNumber string `json:"generatorPermitNumber"`
+			InvalidReason         string `json:"invalidReason"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &snapshots); err != nil || len(snapshots.Data) != 2 {
+		t.Fatalf("snapshot query must return both manifests: %v body=%s", err, string(body))
+	}
+	for _, snapshot := range snapshots.Data {
+		if snapshot.SnapshotVersion != 1 || snapshot.GeneratorPermitNumber != "PERMIT-WG-001" || snapshot.InvalidReason != "" {
+			t.Fatalf("unexpected snapshot payload: %+v", snapshot)
+		}
+	}
+
+	// 停用产废许可：证照变化不得改写已冻结的历史快照。
+	response, body = request(t, engine, http.MethodGet, "/api/generators?search=WG-001", reviewer, "", nil)
+	assertStatus(t, response, http.StatusOK)
+	var generatorPage struct {
+		Data []record `json:"data"`
+	}
+	if err := json.Unmarshal(body, &generatorPage); err != nil || len(generatorPage.Data) != 1 {
+		t.Fatalf("find generator WG-001: %v body=%s", err, string(body))
+	}
+	generator := generatorPage.Data[0]
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/generators/%d/transition", generator.ID), reviewer, "snap-suspend-generator", map[string]any{
+		"status": "suspended", "expectedVersion": generator.Version, "reason": "permit suspended for snapshot test",
+	})
+	assertStatus(t, response, http.StatusOK)
+	response, body = request(t, engine, http.MethodGet, fmt.Sprintf("/api/manifests/%d", manifest.ID), reviewer, "", nil)
+	assertStatus(t, response, http.StatusOK)
+	if frozen := decodeManifestSnapshot(t, body); frozen.GeneratorPermitStatus != "active" || frozen.GeneratorPermitNumber != "PERMIT-WG-001" || frozen.SnapshotVersion != 1 {
+		t.Fatalf("certificate change must not rewrite the frozen snapshot: %+v", frozen)
+	}
+
+	// 核验决定只按冻结快照：实时停用不影响仍为有效的快照。
+	response, body = request(t, engine, http.MethodPost, "/api/checks", operator, "snap-check-create", checkPayload("CC-SNAP-001", manifest.Code))
+	assertStatus(t, response, http.StatusCreated)
+	check := decodeRecord(t, body)
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", check.ID), reviewer, "snap-check-pass", map[string]any{
+		"status": "pass", "expectedVersion": check.Version, "reason": "frozen snapshot is still decision-grade",
+	})
+	assertStatus(t, response, http.StatusOK)
+
+	// 发运前实时失效：整单拒绝且状态不变，失效原因随快照留存。
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", manifest.ID), operator, "snap-dispatch-blocked", map[string]any{
+		"status": "in_transit", "expectedVersion": manifest.Version, "reason": "dispatch must be rejected while permit is suspended",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+	response, body = request(t, engine, http.MethodGet, fmt.Sprintf("/api/manifests/%d", manifest.ID), reviewer, "", nil)
+	assertStatus(t, response, http.StatusOK)
+	manifest = decodeManifestSnapshot(t, body)
+	if manifest.Status != "submitted" || manifest.SnapshotVersion != 1 || !strings.Contains(manifest.SnapshotInvalidReason, "产废许可") {
+		t.Fatalf("blocked dispatch must keep status and record the invalid reason: %+v", manifest)
+	}
+
+	// 携带失效原因的快照必须拦截核验通过。
+	response, body = request(t, engine, http.MethodPost, "/api/checks", operator, "snap-check-blocked", checkPayload("CC-SNAP-002", manifest.Code))
+	assertStatus(t, response, http.StatusCreated)
+	blockedCheck := decodeRecord(t, body)
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", blockedCheck.ID), reviewer, "snap-check-blocked-pass", map[string]any{
+		"status": "pass", "expectedVersion": blockedCheck.Version, "reason": "snapshot invalid reason must block the pass",
+	})
+	assertStatus(t, response, http.StatusUnprocessableEntity)
+
+	// 恢复许可后发运成功，快照版本递增且失效原因清空。
+	response, body = request(t, engine, http.MethodGet, "/api/generators?search=WG-001", reviewer, "", nil)
+	assertStatus(t, response, http.StatusOK)
+	if err := json.Unmarshal(body, &generatorPage); err != nil || len(generatorPage.Data) != 1 {
+		t.Fatalf("re-find generator WG-001: %v body=%s", err, string(body))
+	}
+	generator = generatorPage.Data[0]
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/generators/%d/transition", generator.ID), reviewer, "snap-restore-generator", map[string]any{
+		"status": "active", "expectedVersion": generator.Version, "reason": "permit reinstated",
+	})
+	assertStatus(t, response, http.StatusOK)
+	response, body = request(t, engine, http.MethodPost, fmt.Sprintf("/api/manifests/%d/transition", manifest.ID), operator, "snap-dispatch", map[string]any{
+		"status": "in_transit", "expectedVersion": manifest.Version, "reason": "permits verified again before dispatch",
+	})
+	assertStatus(t, response, http.StatusOK)
+	manifest = decodeManifestSnapshot(t, body)
+	if manifest.Status != "in_transit" || manifest.SnapshotVersion != 2 || manifest.SnapshotInvalidReason != "" {
+		t.Fatalf("dispatch must refreeze the snapshot and clear the invalid reason: %+v", manifest)
+	}
+
+	// 快照恢复有效后核验可通过。
+	response, body = request(t, engine, http.MethodPost, "/api/checks", operator, "snap-check-final", checkPayload("CC-SNAP-003", manifest.Code))
+	assertStatus(t, response, http.StatusCreated)
+	finalCheck := decodeRecord(t, body)
+	response, _ = request(t, engine, http.MethodPost, fmt.Sprintf("/api/checks/%d/transition", finalCheck.ID), reviewer, "snap-check-final-pass", map[string]any{
+		"status": "pass", "expectedVersion": finalCheck.Version, "reason": "refrozen snapshot is valid",
+	})
+	assertStatus(t, response, http.StatusOK)
+
+	// 发运拒绝已随请求 ID 审计。
+	response, body = request(t, engine, http.MethodGet, "/api/audits?search=dispatch_blocked", reviewer, "", nil)
+	assertStatus(t, response, http.StatusOK)
+	if !bytes.Contains(body, []byte("snap-dispatch-blocked")) {
+		t.Fatalf("dispatch block must be audited with its request id: %s", string(body))
+	}
+}
+
 func TestRBACLinkedComplianceWorkflowAndAuditing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := testConfig(t)
@@ -144,7 +352,7 @@ func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	return config.Config{
 		AppName: "hazardous-waste-transfer-compliance-test", Environment: "test", Port: "0",
-		DatabaseDriver: "sqlite", DatabaseDSN: "file:router-test?mode=memory&cache=shared",
+		DatabaseDriver: "sqlite", DatabaseDSN: "file:router-test?mode=memory&cache=shared&_pragma=busy_timeout(5000)",
 		JWTSecret: "router-test-secret-at-least-32-characters", TokenTTL: time.Hour,
 		RequestLimit: 10000, StartupTimeout: 5 * time.Second, ShutdownTimeout: 5 * time.Second,
 		ReadHeaderTimeout: time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 10 * time.Second,

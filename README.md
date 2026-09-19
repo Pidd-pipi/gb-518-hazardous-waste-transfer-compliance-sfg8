@@ -40,8 +40,10 @@ docker compose down -v --remove-orphans
 
 - JWT 登录和 viewer/operator/reviewer/admin 四级 RBAC，后端 middleware、前端守卫、导航与按钮同步生效。
 - 联单提交和发运前会重新核验产废许可为 `active`、承运资质为 `verified`，且双方证照仍在有效期内。
+- 提交与发运时把证照编号、状态、有效期和车辆数随联单冻结为资质快照；发运前实时失效或停用整单拒绝且状态不变，失效原因随快照留存，之后证照变化不改写历史快照。
+- 合规核验决定只依据冻结快照，核验页展示快照版本、有效期与失效原因；`GET /api/manifests/snapshots?codes=...` 供核验页批量回读。
 - 联单只允许 `draft → submitted → in_transit → received`，`submitted/in_transit` 可转 `rejected`；核验决定不可回退，失败仅可升级复核。
-- 已提交联单和已决定核验不可编辑或删除；写入使用乐观锁。
+- 已提交联单和已决定核验不可编辑或删除；写入使用乐观锁，重复或并发提交只成功一次，重复编码返回 409。
 - 建档、许可/证据更新、状态变化和删除与审计日志在同一数据库事务中提交，审计保留 actor 与 request ID。
 - 请求 ID、结构化日志、全局错误映射和 Redis 分布式限流。
 - 提供脱敏运行配置、当前会话、审计汇总和单实体审计历史接口。
@@ -134,6 +136,7 @@ cd .. && docker compose config --quiet
 |---|---|---|
 | `ManifestState` | `draft, submitted, in_transit, received, rejected` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
 | `CheckState` | `pending, pass, fail, escalated` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
+| 资质快照 | 冻结/失效判定 | `backend/internal/service/qualification_snapshot.go`、`frontend/src/components/entity-page.component.ts` |
 
 每个实体自己的完整迁移图同样位于 `backend/internal/constants/status.go`；页面使用的状态列表位于 `frontend/src/types/status.ts`。修改状态时必须同步两处并更新对应服务测试。
 

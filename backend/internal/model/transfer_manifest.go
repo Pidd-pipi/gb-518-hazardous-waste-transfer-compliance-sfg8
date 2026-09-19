@@ -21,6 +21,19 @@ type TransferManifest struct {
 	EffectiveAt   time.Time `json:"effectiveAt"`
 	Evidence      string    `json:"evidence" gorm:"size:2000"`
 	RelatedCode   string    `json:"relatedCode" gorm:"size:64;index"`
+	// Qualification snapshot frozen when the manifest is submitted and again
+	// when it is dispatched. Once frozen, later certificate changes on the
+	// generator or carrier records must not rewrite these fields.
+	SnapshotVersion          uint       `json:"snapshotVersion" gorm:"not null;default:0"`
+	SnapshotAt               *time.Time `json:"snapshotAt"`
+	GeneratorPermitNumber    string     `json:"generatorPermitNumber" gorm:"size:80"`
+	GeneratorPermitStatus    string     `json:"generatorPermitStatus" gorm:"size:40"`
+	GeneratorPermitExpiresAt *time.Time `json:"generatorPermitExpiresAt"`
+	CarrierLicenseNumber     string     `json:"carrierLicenseNumber" gorm:"size:80"`
+	CarrierLicenseStatus     string     `json:"carrierLicenseStatus" gorm:"size:40"`
+	CarrierLicenseExpiresAt  *time.Time `json:"carrierLicenseExpiresAt"`
+	CarrierVehicleCount      int        `json:"carrierVehicleCount"`
+	SnapshotInvalidReason    string     `json:"snapshotInvalidReason" gorm:"size:500"`
 }
 
 func (item *TransferManifest) GetBase() *BaseModel { return &item.BaseModel }

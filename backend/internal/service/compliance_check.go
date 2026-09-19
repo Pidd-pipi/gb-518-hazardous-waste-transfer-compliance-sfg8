@@ -116,6 +116,13 @@ func (s *complianceCheckService) Transition(ctx context.Context, id uint, input 
 	if target == string(constants.CheckStatePass) && manifest.Status != string(constants.ManifestStateSubmitted) && manifest.Status != string(constants.ManifestStateInTransit) && manifest.Status != string(constants.ManifestStateReceived) {
 		return model.ComplianceCheck{}, fmt.Errorf("%w: only an active or received manifest can pass compliance review", ErrInvalidInput)
 	}
+	if target == string(constants.CheckStatePass) {
+		// The decision is made from the frozen qualification snapshot only;
+		// live certificate records are deliberately not consulted here.
+		if reason := SnapshotInvalidReason(manifest, time.Now().UTC()); reason != "" {
+			return model.ComplianceCheck{}, fmt.Errorf("%w: 联单资质快照未通过核验: %s", ErrInvalidInput, reason)
+		}
+	}
 	if strings.TrimSpace(current.Evidence) == "" || strings.TrimSpace(input.Reason) == "" {
 		return model.ComplianceCheck{}, fmt.Errorf("%w: decision evidence and reason are required", ErrInvalidInput)
 	}

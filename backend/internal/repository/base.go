@@ -12,6 +12,19 @@ import (
 
 var ErrVersionConflict = errors.New("record was changed by another request")
 
+// IsDuplicateKey reports whether the error is a unique-constraint violation
+// from any supported database driver, so repeated submissions of the same
+// business code can be answered with a conflict instead of a server error.
+func IsDuplicateKey(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unique constraint failed") || // sqlite
+		strings.Contains(message, "duplicate key") || // postgres
+		strings.Contains(message, "duplicate entry") // mysql
+}
+
 type Page[T any] struct {
 	Items    []T   `json:"items"`
 	Total    int64 `json:"total"`
@@ -57,6 +70,27 @@ func (s *Store[T]) FindByCode(ctx context.Context, code string) (T, error) {
 	var item T
 	err := s.db.WithContext(ctx).Where("UPPER(code) = ?", strings.ToUpper(strings.TrimSpace(code))).First(&item).Error
 	return item, err
+}
+
+// ListByCodes loads every record whose code is in the given set. Codes are
+// normalized and de-duplicated so callers can pass raw user input.
+func (s *Store[T]) ListByCodes(ctx context.Context, codes []string) ([]T, error) {
+	normalized := make([]string, 0, len(codes))
+	seen := make(map[string]bool, len(codes))
+	for _, code := range codes {
+		code = strings.ToUpper(strings.TrimSpace(code))
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		normalized = append(normalized, code)
+	}
+	items := make([]T, 0, len(normalized))
+	if len(normalized) == 0 {
+		return items, nil
+	}
+	err := s.db.WithContext(ctx).Where("UPPER(code) IN ?", normalized).Find(&items).Error
+	return items, err
 }
 
 func (s *Store[T]) Create(ctx context.Context, item *T) error {

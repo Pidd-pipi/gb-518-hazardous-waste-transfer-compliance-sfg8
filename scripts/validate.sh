@@ -77,10 +77,71 @@ submitted=$(curl -fsS -X POST "$backend_url/api/manifests/$manifest_id/transitio
   -H "Authorization: Bearer $operator_token" -H 'X-Request-ID: validation-manifest-submit' -H 'Content-Type: application/json' \
   -d "{\"status\":\"submitted\",\"expectedVersion\":$manifest_version,\"reason\":\"generator and carrier evidence verified\"}")
 printf '%s' "$submitted" | jq -e '.data.status == "submitted" and .data.version == 2' >/dev/null
+# 提交即冻结资质快照：证照编号、状态、有效期与车辆数随联单保存。
+printf '%s' "$submitted" | jq -e '.data.snapshotVersion == 1
+  and .data.generatorPermitNumber == "PERMIT-WG-001" and .data.generatorPermitStatus == "active"
+  and (.data.generatorPermitExpiresAt | length > 0)
+  and .data.carrierLicenseNumber == "CARRIER-LIC-002" and .data.carrierLicenseStatus == "verified"
+  and (.data.carrierLicenseExpiresAt | length > 0) and .data.carrierVehicleCount == 16
+  and .data.snapshotInvalidReason == ""' >/dev/null
+
+# 重复提交只能成功一次。
+duplicate_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/manifests/$manifest_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
+  -d '{"status":"submitted","expectedVersion":2,"reason":"duplicate submit must be rejected"}')
+[ "$duplicate_status" = "422" ]
+
+# 刷新后可回读冻结快照。
+snapshot_view=$(curl -fsS "$backend_url/api/manifests/snapshots?codes=$manifest_code" -H "Authorization: Bearer $viewer_token")
+printf '%s' "$snapshot_view" | jq -e '.data[0].snapshotVersion == 1 and .data[0].invalidReason == "" and .data[0].carrierVehicleCount == 16' >/dev/null
+
+# 发运前产废许可实时停用：整单拒绝且状态不变，失效原因随快照留存。
+generator=$(curl -fsS "$backend_url/api/generators?search=WG-001" -H "Authorization: Bearer $reviewer_token")
+generator_id=$(printf '%s' "$generator" | jq -er '.data[0].id')
+generator_version=$(printf '%s' "$generator" | jq -er '.data[0].version')
+curl -fsS -X POST "$backend_url/api/generators/$generator_id/transition" -H "Authorization: Bearer $reviewer_token" \
+  -H 'Content-Type: application/json' -d "{\"status\":\"suspended\",\"expectedVersion\":$generator_version,\"reason\":\"validation suspends the permit\"}" >/dev/null
+blocked_dispatch=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/manifests/$manifest_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'X-Request-ID: validation-dispatch-blocked' -H 'Content-Type: application/json' \
+  -d '{"status":"in_transit","expectedVersion":2,"reason":"suspended permit must block dispatch"}')
+[ "$blocked_dispatch" = "422" ]
+manifest_now=$(curl -fsS "$backend_url/api/manifests/$manifest_id" -H "Authorization: Bearer $viewer_token")
+printf '%s' "$manifest_now" | jq -e '.data.status == "submitted" and .data.snapshotVersion == 1
+  and (.data.snapshotInvalidReason | length > 0)
+  and .data.generatorPermitNumber == "PERMIT-WG-001" and .data.generatorPermitStatus == "active"' >/dev/null
+manifest_version=$(printf '%s' "$manifest_now" | jq -er '.data.version')
+
+# 证照变化不得改写历史快照；携带失效原因时核验不得通过。
+snapshot_view=$(curl -fsS "$backend_url/api/manifests/snapshots?codes=$manifest_code" -H "Authorization: Bearer $viewer_token")
+printf '%s' "$snapshot_view" | jq -e '.data[0].snapshotVersion == 1 and (.data[0].invalidReason | length > 0)' >/dev/null
+blocked_check_code="CC-BLOCKED-$stamp"
+blocked_check_payload=$(jq -nc --arg code "$blocked_check_code" --arg manifest "$manifest_code" --arg now "$now" '{
+  code:$code,name:"失效快照拦截核验",description:"Snapshot invalid reason must block the pass",manifestCode:$manifest,
+  checklist:"产废许可、承运资质、联单数量、处置去向",decisionBasis:"",facility:"复核中心",owner:"reviewer",
+  category:"联单复核",riskLevel:"medium",metricValue:60,metricUnit:"score",effectiveAt:$now,
+  evidence:"minio://evidence/validation/blocked-check.pdf",relatedCode:$manifest
+}')
+blocked_check=$(curl -fsS -X POST "$backend_url/api/checks" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d "$blocked_check_payload")
+blocked_check_id=$(printf '%s' "$blocked_check" | jq -er '.data.id')
+blocked_decision=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/checks/$blocked_check_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"status":"pass","expectedVersion":1,"reason":"invalid snapshot must block the decision"}')
+[ "$blocked_decision" = "422" ]
+
+# 许可恢复后发运成功，快照版本递增且失效原因清空。
+generator=$(curl -fsS "$backend_url/api/generators?search=WG-001" -H "Authorization: Bearer $reviewer_token")
+generator_id=$(printf '%s' "$generator" | jq -er '.data[0].id')
+generator_version=$(printf '%s' "$generator" | jq -er '.data[0].version')
+curl -fsS -X POST "$backend_url/api/generators/$generator_id/transition" -H "Authorization: Bearer $reviewer_token" \
+  -H 'Content-Type: application/json' -d "{\"status\":\"active\",\"expectedVersion\":$generator_version,\"reason\":\"validation reinstates the permit\"}" >/dev/null
+dispatched=$(curl -fsS -X POST "$backend_url/api/manifests/$manifest_id/transition" \
+  -H "Authorization: Bearer $operator_token" -H 'X-Request-ID: validation-manifest-dispatch' -H 'Content-Type: application/json' \
+  -d "{\"status\":\"in_transit\",\"expectedVersion\":$manifest_version,\"reason\":\"permits verified again before dispatch\"}")
+printf '%s' "$dispatched" | jq -e '.data.status == "in_transit" and .data.snapshotVersion == 2 and .data.snapshotInvalidReason == ""' >/dev/null
 
 stale_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$backend_url/api/manifests/$manifest_id/transition" \
   -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' \
-  -d '{"status":"in_transit","expectedVersion":1,"reason":"stale version must conflict"}')
+  -d '{"status":"received","expectedVersion":1,"reason":"stale version must conflict"}')
 [ "$stale_status" = "409" ]
 
 blocked_code="TM-BLOCKED-$stamp"
@@ -117,7 +178,7 @@ printf '%s' "$decision" | jq -e '.data.status == "pass" and .data.version == 2 a
 viewer_audit_status=$(curl -sS -o /dev/null -w '%{http_code}' "$backend_url/api/audits" -H "Authorization: Bearer $viewer_token")
 [ "$viewer_audit_status" = "403" ]
 audits=$(curl -fsS "$backend_url/api/audits?page=1&pageSize=100" -H "Authorization: Bearer $reviewer_token")
-printf '%s' "$audits" | jq -e '([.data[].requestId]) as $ids | ($ids | index("validation-manifest-submit")) != null and ($ids | index("validation-reviewer-decision")) != null' >/dev/null
+printf '%s' "$audits" | jq -e '([.data[].requestId]) as $ids | ($ids | index("validation-manifest-submit")) != null and ($ids | index("validation-reviewer-decision")) != null and ($ids | index("validation-dispatch-blocked")) != null' >/dev/null
 curl -fsS "$backend_url/api/audit-summary?windowHours=24" -H "Authorization: Bearer $reviewer_token" | jq -e '.data.total >= 5 and .data.transitions >= 2' >/dev/null
 
 docker compose ps

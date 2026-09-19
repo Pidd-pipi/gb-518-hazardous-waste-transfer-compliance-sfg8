@@ -29,8 +29,35 @@ export interface DomainRecord {
 	manifestCode?: string;
 	checklist?: string;
 	decisionBasis?: string;
+	snapshotVersion?: number;
+	snapshotAt?: string | null;
+	generatorPermitNumber?: string;
+	generatorPermitStatus?: string;
+	generatorPermitExpiresAt?: string | null;
+	carrierLicenseNumber?: string;
+	carrierLicenseStatus?: string;
+	carrierLicenseExpiresAt?: string | null;
+	carrierVehicleCount?: number;
+	snapshotInvalidReason?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ManifestSnapshot {
+  manifestCode: string;
+  manifestStatus: string;
+  snapshotVersion: number;
+  snapshotAt: string | null;
+  generatorCode: string;
+  generatorPermitNumber: string;
+  generatorPermitStatus: string;
+  generatorPermitExpiresAt: string | null;
+  carrierCode: string;
+  carrierLicenseNumber: string;
+  carrierLicenseStatus: string;
+  carrierLicenseExpiresAt: string | null;
+  carrierVehicleCount: number;
+  invalidReason: string;
 }
 
 export interface PageMeta { page: number; pageSize: number; total: number }

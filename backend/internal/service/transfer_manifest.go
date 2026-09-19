@@ -20,6 +20,7 @@ type TransferManifestService interface {
 	Transition(context.Context, uint, dto.TransitionRequest, string, string) (model.TransferManifest, error)
 	Delete(context.Context, uint, string, string) error
 	StatusCounts(context.Context) (map[string]int64, error)
+	Snapshots(context.Context, []string) ([]dto.ManifestSnapshot, error)
 }
 
 type transferManifestService struct {
@@ -120,9 +121,17 @@ func (s *transferManifestService) Transition(ctx context.Context, id uint, input
 		return model.TransferManifest{}, fmt.Errorf("%w: %s -> %s", ErrInvalidTransition, current.Status, target)
 	}
 	if target == "submitted" || target == "in_transit" {
-		if err := s.validateLinkedParties(ctx, current); err != nil {
-			return model.TransferManifest{}, err
+		generator, carrier, invalidReason := s.verifyLinkedParties(ctx, current)
+		if invalidReason != "" {
+			if target == "in_transit" {
+				// 发运前实时失效或停用：整单拒绝且状态不变，失效原因随快照留存。
+				if err := s.recordDispatchBlock(ctx, current, input.ExpectedVersion, invalidReason, actor, requestID); err != nil {
+					return model.TransferManifest{}, err
+				}
+			}
+			return model.TransferManifest{}, fmt.Errorf("%w: %s", ErrInvalidInput, invalidReason)
 		}
+		freezeQualificationSnapshot(&current, generator, carrier, time.Now().UTC())
 	}
 	before := current.Status
 	current.Status = target
@@ -149,22 +158,62 @@ func (s *transferManifestService) StatusCounts(ctx context.Context) (map[string]
 	return s.repository.CountByStatus(ctx)
 }
 
-func (s *transferManifestService) validateLinkedParties(ctx context.Context, manifest model.TransferManifest) error {
+// Snapshots returns the frozen qualification snapshots for the given manifest
+// codes. The invalid reason is derived from the frozen snapshot only, so the
+// verification page never depends on live certificate records.
+func (s *transferManifestService) Snapshots(ctx context.Context, codes []string) ([]dto.ManifestSnapshot, error) {
+	manifests, err := s.repository.ListByCodes(ctx, codes)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	snapshots := make([]dto.ManifestSnapshot, 0, len(manifests))
+	for _, manifest := range manifests {
+		snapshots = append(snapshots, dto.ManifestSnapshot{
+			ManifestCode:             manifest.Code,
+			ManifestStatus:           manifest.Status,
+			SnapshotVersion:          manifest.SnapshotVersion,
+			SnapshotAt:               manifest.SnapshotAt,
+			GeneratorCode:            manifest.GeneratorCode,
+			GeneratorPermitNumber:    manifest.GeneratorPermitNumber,
+			GeneratorPermitStatus:    manifest.GeneratorPermitStatus,
+			GeneratorPermitExpiresAt: manifest.GeneratorPermitExpiresAt,
+			CarrierCode:              manifest.CarrierCode,
+			CarrierLicenseNumber:     manifest.CarrierLicenseNumber,
+			CarrierLicenseStatus:     manifest.CarrierLicenseStatus,
+			CarrierLicenseExpiresAt:  manifest.CarrierLicenseExpiresAt,
+			CarrierVehicleCount:      manifest.CarrierVehicleCount,
+			InvalidReason:            SnapshotInvalidReason(manifest, now),
+		})
+	}
+	return snapshots, nil
+}
+
+// verifyLinkedParties loads the live generator and carrier records and runs
+// the real-time qualification check required before submit and dispatch.
+func (s *transferManifestService) verifyLinkedParties(ctx context.Context, manifest model.TransferManifest) (model.WasteGenerator, model.CarrierProfile, string) {
 	generator, err := s.generators.FindByCode(ctx, manifest.GeneratorCode)
 	if err != nil {
-		return fmt.Errorf("%w: linked generator is unavailable", ErrInvalidInput)
-	}
-	if generator.Status != "active" || !generator.PermitExpiresAt.After(time.Now().UTC()) {
-		return fmt.Errorf("%w: generator permit must be active and unexpired", ErrInvalidInput)
+		return model.WasteGenerator{}, model.CarrierProfile{}, "关联产废单位档案不可用"
 	}
 	carrier, err := s.carriers.FindByCode(ctx, manifest.CarrierCode)
 	if err != nil {
-		return fmt.Errorf("%w: linked carrier is unavailable", ErrInvalidInput)
+		return model.WasteGenerator{}, model.CarrierProfile{}, "关联承运方档案不可用"
 	}
-	if carrier.Status != "verified" || !carrier.LicenseExpiresAt.After(time.Now().UTC()) {
-		return fmt.Errorf("%w: carrier license must be verified and unexpired", ErrInvalidInput)
+	if reason := verifyLinkedQualifications(generator, carrier, time.Now().UTC()); reason != "" {
+		return generator, carrier, reason
 	}
-	return nil
+	return generator, carrier, ""
+}
+
+// recordDispatchBlock persists the real-time invalidation reason on the
+// manifest without changing its status, so the verification page can explain
+// why the whole order was rejected before dispatch.
+func (s *transferManifestService) recordDispatchBlock(ctx context.Context, current model.TransferManifest, expectedVersion uint, reason, actor, requestID string) error {
+	current.SnapshotInvalidReason = reason
+	current.Version = expectedVersion + 1
+	current.UpdatedAt = time.Now().UTC()
+	return s.repository.UpdateAudited(ctx, current.ID, expectedVersion, &current, newAuditLog(actor, requestID, "dispatch_blocked", "TransferManifest", current.Status, current.Status, reason))
 }
 
 func validateTransferManifestBusinessFields(code, name, facility, owner, generatorCode, carrierCode, wasteCode, destination, evidence string, quantityKg float64) error {

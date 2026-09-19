@@ -3,10 +3,11 @@ import { ChangeDetectorRef, Component, Input, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatInputModule } from '@angular/material/input';
+import { listManifestSnapshots } from '../api/transfer-manifest';
 import { useAuth } from '../hooks/use-auth';
 import { createPagination } from '../hooks/use-pagination';
 import type { EntityStore } from '../stores/factory';
-import type { DomainRecord, EntityConfig } from '../types/domain';
+import type { DomainRecord, EntityConfig, ManifestSnapshot } from '../types/domain';
 import { TRANSITIONS } from '../types/status';
 import { formatDate } from '../utils/format';
 import { ConfirmDialogComponent } from './common/confirm-dialog.component';
@@ -42,13 +43,17 @@ import { StatusBadgeComponent } from './common/status-badge.component';
 
       <section class="table-shell">
         <table>
-          <thead><tr><th>编码</th><th>名称</th><th>状态</th><th>业务凭证</th><th>风险</th><th>责任人</th><th>指标</th><th>更新时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>编码</th><th>名称</th><th>状态</th><th>业务凭证</th><th *ngIf="isCheckPage()">资质快照</th><th>风险</th><th>责任人</th><th>指标</th><th>更新时间</th><th>操作</th></tr></thead>
           <tbody>
             <tr *ngFor="let item of state.items; trackBy: trackById">
               <td><strong>{{ item.code }}</strong></td>
               <td>{{ item.name }}<small>{{ item.facility }}</small></td>
               <td><app-status-badge [status]="item.status" /></td>
               <td><span class="domain-detail">{{ domainDetail(item) }}</span><small>{{ item.evidence }}</small></td>
+              <td *ngIf="isCheckPage()">
+                <span class="domain-detail">{{ snapshotLine(item) }}</span>
+                <small [class.snapshot-invalid]="!!snapshotOf(item)?.invalidReason">{{ snapshotDetail(item) }}</small>
+              </td>
               <td><span [class]="'risk risk--' + item.riskLevel">{{ item.riskLevel }}</span></td>
               <td>{{ item.owner }}</td>
               <td>{{ item.metricValue }} {{ item.metricUnit }}</td>
@@ -60,7 +65,7 @@ import { StatusBadgeComponent } from './common/status-badge.component';
                 <span *ngIf="!canTransition() || transitions(item).length === 0" class="muted">{{ auth.hasMinimumRole('operator') ? '流程结束' : '只读' }}</span>
               </td>
             </tr>
-            <tr *ngIf="!state.items.length && !state.loading"><td colspan="9" class="empty">暂无记录</td></tr>
+            <tr *ngIf="!state.items.length && !state.loading"><td [attr.colspan]="isCheckPage() ? 10 : 9" class="empty">暂无记录</td></tr>
           </tbody>
         </table>
         <div *ngIf="state.loading" class="loading">正在同步业务数据…</div>
@@ -91,6 +96,7 @@ export class EntityPageComponent implements OnInit {
   search = '';
   showCreate = false;
   pending: { item: DomainRecord; status: string } | null = null;
+  snapshots: Record<string, ManifestSnapshot> = {};
 
   constructor(private readonly changeDetector: ChangeDetectorRef) {}
 
@@ -99,8 +105,23 @@ export class EntityPageComponent implements OnInit {
   highRisk(items: DomainRecord[]): number { return items.filter((item) => ['high', 'critical'].includes(item.riskLevel)).length; }
   statusCount(items: DomainRecord[]): number { return new Set(items.map((item) => item.status)).size; }
   isLicensePage(): boolean { return this.config.key === 'wasteGenerator' || this.config.key === 'carrierProfile'; }
+  isCheckPage(): boolean { return this.config.key === 'complianceCheck'; }
   canTransition(): boolean { return this.auth.hasMinimumRole(this.config.transitionRole); }
   transitions(item: DomainRecord): readonly string[] { return TRANSITIONS[this.config.key]?.[item.status] ?? []; }
+  snapshotOf(item: DomainRecord): ManifestSnapshot | undefined { return this.snapshots[(item.manifestCode || '').toUpperCase()]; }
+
+  snapshotLine(item: DomainRecord): string {
+    const snapshot = this.snapshotOf(item);
+    if (!snapshot || !snapshot.snapshotVersion) return '无冻结快照';
+    return `快照 v${snapshot.snapshotVersion} · ${snapshot.carrierVehicleCount} 辆`;
+  }
+
+  snapshotDetail(item: DomainRecord): string {
+    const snapshot = this.snapshotOf(item);
+    if (!snapshot) return '联单快照未找到';
+    if (snapshot.invalidReason) return `失效原因：${snapshot.invalidReason}`;
+    return `有效期 ${this.formatDate(snapshot.generatorPermitExpiresAt || '')} / ${this.formatDate(snapshot.carrierLicenseExpiresAt || '')}`;
+  }
 
   pageDescription(): string {
     const descriptions: Record<string, string> = {
@@ -115,7 +136,10 @@ export class EntityPageComponent implements OnInit {
   domainDetail(item: DomainRecord): string {
     if (this.config.key === 'wasteGenerator') return `${item.permitNumber || '-'} · ${item.wasteCategories || '-'}`;
     if (this.config.key === 'carrierProfile') return `${item.licenseNumber || '-'} · ${item.vehicleCount || 0} 辆`;
-    if (this.config.key === 'transferManifest') return `${item.generatorCode} → ${item.carrierCode} · ${item.quantityKg} kg`;
+    if (this.config.key === 'transferManifest') {
+      const base = `${item.generatorCode} → ${item.carrierCode} · ${item.quantityKg} kg`;
+      return item.snapshotVersion ? `${base} · 快照v${item.snapshotVersion}` : base;
+    }
     return `${item.manifestCode || '-'} · ${item.decisionBasis || '待决定'}`;
   }
 
@@ -168,6 +192,27 @@ export class EntityPageComponent implements OnInit {
 
   private async load(): Promise<void> {
     await this.store.load(this.config.path, this.search, this.pagination.page(), this.pagination.pageSize());
+    await this.loadSnapshots();
     this.changeDetector.detectChanges();
+  }
+
+  private async loadSnapshots(): Promise<void> {
+    if (!this.isCheckPage()) {
+      this.snapshots = {};
+      return;
+    }
+    const codes = [...new Set(this.store.snapshot.items
+      .map((item) => (item.manifestCode || '').toUpperCase())
+      .filter((code) => code.length > 0))];
+    if (!codes.length) {
+      this.snapshots = {};
+      return;
+    }
+    try {
+      const result = await listManifestSnapshots(codes);
+      this.snapshots = Object.fromEntries(result.data.map((snapshot) => [snapshot.manifestCode.toUpperCase(), snapshot]));
+    } catch {
+      this.snapshots = {};
+    }
   }
 }

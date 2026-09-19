@@ -188,6 +188,11 @@ func seedTransferManifest(ctx context.Context, db *gorm.DB) error {
 		return err
 	}
 	now := time.Now().UTC()
+	// Demo manifests that already left draft carry the qualification snapshot
+	// frozen at their last verified transition, matching seed generator WG-001
+	// and seed carrier CP-002.
+	permitExpiresAt := now.AddDate(1, 0, 0)
+	licenseExpiresAt := now.AddDate(0, 10, 0)
 	items := []model.TransferManifest{
 
 		{BaseModel: model.BaseModel{Code: "TM-001", Name: "转运清单示例一", Status: "draft", Version: 1,
@@ -200,13 +205,19 @@ func seedTransferManifest(ctx context.Context, db *gorm.DB) error {
 			Description: "用于启动验证和主要流程演示的转运清单记录"}, GeneratorCode: "WG-001", CarrierCode: "CP-002", WasteCode: "HW17-336-064-17", QuantityKg: 850, Destination: "资源化利用中心 B",
 			Facility: "危险废物转运合规核验区域2", Owner: "质量复核组",
 			Category: "重点", RiskLevel: "medium", MetricValue: 25.0, MetricUnit: "%",
-			EffectiveAt: now.Add(3 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-02"},
+			EffectiveAt: now.Add(3 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-02",
+			SnapshotVersion: 1, SnapshotAt: &now,
+			GeneratorPermitNumber: "PERMIT-WG-001", GeneratorPermitStatus: "active", GeneratorPermitExpiresAt: &permitExpiresAt,
+			CarrierLicenseNumber: "CARRIER-LIC-002", CarrierLicenseStatus: "verified", CarrierLicenseExpiresAt: &licenseExpiresAt, CarrierVehicleCount: 16},
 
 		{BaseModel: model.BaseModel{Code: "TM-003", Name: "转运清单示例三", Status: "in_transit", Version: 1,
 			Description: "用于启动验证和主要流程演示的转运清单记录"}, GeneratorCode: "WG-001", CarrierCode: "CP-002", WasteCode: "HW49-900-041-49", QuantityKg: 420, Destination: "安全填埋中心 C",
 			Facility: "危险废物转运合规核验区域3", Owner: "安全主管组",
 			Category: "复核", RiskLevel: "high", MetricValue: 37.5, MetricUnit: "score",
-			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-03"},
+			EffectiveAt: now.Add(6 * time.Hour), Evidence: "已完成基础证据核对", RelatedCode: "REL-518-03",
+			SnapshotVersion: 2, SnapshotAt: &now,
+			GeneratorPermitNumber: "PERMIT-WG-001", GeneratorPermitStatus: "active", GeneratorPermitExpiresAt: &permitExpiresAt,
+			CarrierLicenseNumber: "CARRIER-LIC-002", CarrierLicenseStatus: "verified", CarrierLicenseExpiresAt: &licenseExpiresAt, CarrierVehicleCount: 16},
 	}
 	return db.WithContext(ctx).Create(&items).Error
 }
